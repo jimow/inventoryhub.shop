@@ -1,0 +1,950 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Search, Plus, Minus, X, ShoppingCart, Trash2,
+  CheckCircle2, Receipt, Banknote, Smartphone, Building2,
+  CreditCard, Loader2, Package, ScanLine, Pause, Play,
+  XCircle, Printer,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Combobox } from "@/components/ui/combobox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
+import { formatMoney } from "@/lib/utils";
+
+import type { Product, Customer, PaymentMethod, SettingsData, SaleLine } from "@/lib/types";
+import { checkoutPos, posStkInitiate, posStkStatus } from "./actions";
+
+type CartLine = SaleLine & { stock: number };
+type ParkedSale = {
+  id: string;
+  savedAt: string;
+  customerId: string;
+  cart: CartLine[];
+  discount: number;
+  taxRate: number;
+};
+type LastReceipt = {
+  invoice_no: string;
+  payment_no: string;
+  total: number;
+  tendered?: number;
+  change_due?: number;
+  method_name?: string;
+  method_kind?: string;
+  reference?: string | null;
+  mpesa_receipt_no?: string | null;
+  date: string;
+};
+
+const KIND_ICON: Record<string, React.ElementType> = {
+  cash: Banknote, mpesa: Smartphone, bank: Building2, card: CreditCard, other: Receipt,
+};
+
+const PARK_KEY = "pos.parked.v1";
+const LAST_RECEIPT_KEY = "pos.last_receipt.v1";
+
+export function PosClient({
+  products, customers, methods, settings,
+}: {
+  products: Product[];
+  customers: Customer[];
+  methods: PaymentMethod[];
+  settings: SettingsData;
+}) {
+  const router = useRouter();
+  const sym = settings.currency?.symbol || "$";
+  const defaultTax = Number(settings.tax?.defaultRate || 0);
+
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("All");
+  const [cart, setCart] = useState<CartLine[]>([]);
+  const [discount, setDiscount] = useState(0);
+  const [taxRate, setTaxRate] = useState(defaultTax);
+  const [customerId, setCustomerId] = useState<string>("");
+  const [payOpen, setPayOpen] = useState(false);
+  const [receipt, setReceipt] = useState<LastReceipt | null>(null);
+  const [parkOpen, setParkOpen] = useState(false);
+  const [parked, setParked] = useState<ParkedSale[]>([]);
+
+  // Hydrate parked sales from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PARK_KEY);
+      if (raw) setParked(JSON.parse(raw) as ParkedSale[]);
+    } catch { /* ignore */ }
+  }, []);
+
+  function persistParked(next: ParkedSale[]) {
+    setParked(next);
+    try { localStorage.setItem(PARK_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+  }
+
+  function persistLastReceipt(r: LastReceipt) {
+    try { localStorage.setItem(LAST_RECEIPT_KEY, JSON.stringify(r)); } catch { /* ignore */ }
+  }
+
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    products.forEach((p) => p.category && set.add(p.category));
+    return ["All", ...Array.from(set).sort()];
+  }, [products]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return products.filter((p) => {
+      if (activeCategory !== "All" && p.category !== activeCategory) return false;
+      if (!q) return true;
+      return (
+        p.name.toLowerCase().includes(q) ||
+        (p.code || "").toLowerCase().includes(q) ||
+        (p.sku || "").toLowerCase().includes(q) ||
+        (p.barcode || "").toLowerCase().includes(q)
+      );
+    });
+  }, [products, search, activeCategory]);
+
+  const totals = useMemo(() => {
+    const subtotal = cart.reduce((s, l) => s + l.qty * l.price, 0);
+    const base = Math.max(0, subtotal - discount);
+    const tax = (base * taxRate) / 100;
+    return { subtotal, tax, total: Math.round((base + tax) * 100) / 100 };
+  }, [cart, discount, taxRate]);
+
+  function addToCart(p: Product) {
+    if (p.current_stock <= 0) {
+      toast.error(`${p.name} is out of stock`);
+      return;
+    }
+    setCart((prev) => {
+      const i = prev.findIndex((l) => l.refId === p.id);
+      if (i >= 0) {
+        const next = [...prev];
+        if (next[i].qty + 1 > p.current_stock) {
+          toast.error(`Only ${p.current_stock} ${p.name} in stock`);
+          return prev;
+        }
+        next[i] = { ...next[i], qty: next[i].qty + 1 };
+        return next;
+      }
+      return [...prev, { refId: p.id, name: p.name, qty: 1, price: Number(p.selling_price), stock: Number(p.current_stock) }];
+    });
+  }
+
+  function changeQty(refId: string, delta: number) {
+    setCart((prev) =>
+      prev
+        .map((l) => l.refId === refId ? { ...l, qty: Math.max(0, l.qty + delta) } : l)
+        .filter((l) => l.qty > 0)
+    );
+  }
+  function setQty(refId: string, qty: number) {
+    setCart((prev) => prev.map((l) => l.refId === refId ? { ...l, qty: Math.max(0, qty) } : l).filter((l) => l.qty > 0));
+  }
+  function removeLine(refId: string) {
+    setCart((prev) => prev.filter((l) => l.refId !== refId));
+  }
+  function clearCart() {
+    setCart([]); setDiscount(0); setCustomerId(""); setTaxRate(defaultTax);
+  }
+
+  function parkCurrent() {
+    if (cart.length === 0) { toast.error("Nothing to park"); return; }
+    const entry: ParkedSale = {
+      id: `park-${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      customerId,
+      cart, discount, taxRate,
+    };
+    persistParked([entry, ...parked].slice(0, 20));
+    clearCart();
+    toast.success("Sale parked. Resume anytime from the Parked button.");
+  }
+
+  function resumeParked(p: ParkedSale) {
+    if (cart.length > 0 && !confirm("Replace the current cart with this parked sale?")) return;
+    setCart(p.cart);
+    setDiscount(p.discount);
+    setTaxRate(p.taxRate);
+    setCustomerId(p.customerId);
+    persistParked(parked.filter((x) => x.id !== p.id));
+    setParkOpen(false);
+  }
+
+  function deleteParked(id: string) {
+    persistParked(parked.filter((x) => x.id !== id));
+  }
+
+  function showLastReceipt() {
+    try {
+      const raw = localStorage.getItem(LAST_RECEIPT_KEY);
+      if (!raw) { toast.error("No receipt yet today"); return; }
+      setReceipt(JSON.parse(raw) as LastReceipt);
+    } catch { toast.error("Could not load last receipt"); }
+  }
+
+  function onSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Enter") return;
+    const q = search.trim().toLowerCase();
+    if (!q) return;
+    const hit = products.find((p) =>
+      p.barcode?.toLowerCase() === q ||
+      p.sku?.toLowerCase() === q ||
+      p.code.toLowerCase() === q
+    ) || filtered[0];
+    if (hit) {
+      addToCart(hit);
+      setSearch("");
+    }
+  }
+
+  return (
+    <div className="-m-6 h-[calc(100vh-3.5rem)] grid grid-cols-1 lg:grid-cols-12 gap-0 bg-slate-50">
+      {/* LEFT: products */}
+      <div className="lg:col-span-8 flex flex-col border-r border-slate-200 bg-white">
+        <div className="p-4 border-b border-slate-200 bg-white">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+            <Input
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={onSearchKeyDown}
+              placeholder="Scan barcode, search by name, SKU, or code…"
+              className="pl-9 pr-9 h-11 text-base"
+            />
+            <ScanLine className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+          </div>
+          <div className="mt-3 flex items-center gap-2 flex-wrap">
+            <div className="flex flex-wrap gap-1.5 flex-1">
+              {categories.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setActiveCategory(c)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                    activeCategory === c
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  )}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => setParkOpen(true)}
+                className="h-8 px-2 text-xs">
+                <Pause className="h-3.5 w-3.5" />
+                Parked {parked.length > 0 && `(${parked.length})`}
+              </Button>
+              <Button variant="outline" size="sm" onClick={showLastReceipt}
+                className="h-8 px-2 text-xs">
+                <Receipt className="h-3.5 w-3.5" />
+                Last
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4">
+          {filtered.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400">
+              <Package className="h-10 w-10 mb-3" />
+              <p className="text-sm">No products match.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
+              {filtered.map((p) => {
+                const out = p.current_stock <= 0;
+                const low = p.current_stock <= p.min_stock;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => addToCart(p)}
+                    disabled={out}
+                    className={cn(
+                      "group relative flex flex-col bg-white border border-slate-200 rounded-xl p-3 text-left transition-all",
+                      out
+                        ? "opacity-50 cursor-not-allowed"
+                        : "hover:border-blue-400 hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm"
+                    )}
+                  >
+                    <div className="aspect-square w-full bg-gradient-to-br from-slate-100 to-slate-200 rounded-lg flex items-center justify-center mb-2">
+                      <Package className="h-8 w-8 text-slate-400" />
+                    </div>
+                    <div className="text-xs text-slate-500 font-mono">{p.code}</div>
+                    <div className="text-sm font-semibold text-slate-900 line-clamp-2 leading-tight">{p.name}</div>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-base font-bold text-blue-700">{formatMoney(p.selling_price, sym)}</span>
+                      <Badge variant={out ? "danger" : low ? "warning" : "secondary"} className="text-[10px]">
+                        {out ? "Out" : `${p.current_stock} ${p.unit}`}
+                      </Badge>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* RIGHT: cart */}
+      <div className="lg:col-span-4 flex flex-col bg-white">
+        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShoppingCart className="h-5 w-5 text-blue-600" />
+            <h2 className="font-semibold text-slate-900">Current Sale</h2>
+            {cart.length > 0 && <Badge variant="info">{cart.length}</Badge>}
+          </div>
+          <div className="flex items-center gap-1">
+            {cart.length > 0 && (
+              <>
+                <Button variant="ghost" size="sm" onClick={parkCurrent}
+                  className="text-amber-700 hover:text-amber-800 h-8 px-2">
+                  <Pause className="h-3.5 w-3.5" /> Park
+                </Button>
+                <Button variant="ghost" size="sm" onClick={clearCart}
+                  className="text-red-600 hover:text-red-700 h-8 px-2">
+                  <Trash2 className="h-3.5 w-3.5" /> Clear
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="px-4 pt-3 pb-2 border-b border-slate-100">
+          <Label className="text-xs text-slate-500 mb-1 block">Customer (optional)</Label>
+          <Combobox
+            value={customerId}
+            onChange={setCustomerId}
+            options={[
+              { value: "", label: "— Walk-in customer —" },
+              ...customers.map((c) => ({ value: c.id, label: c.name, sub: c.email || c.phone || c.code })),
+            ]}
+            placeholder="Walk-in customer"
+          />
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-2">
+          {cart.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 py-12">
+              <ShoppingCart className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm font-medium">Cart is empty</p>
+              <p className="text-xs mt-1">Tap a product to add it</p>
+            </div>
+          ) : (
+            <div className="space-y-2 py-2">
+              {cart.map((l) => (
+                <div key={l.refId} className="flex items-start gap-2 p-2.5 bg-slate-50 rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-slate-900 line-clamp-1">{l.name}</div>
+                    <div className="mt-1 flex items-center gap-1">
+                      <Button variant="outline" size="icon" className="h-7 w-7"
+                        onClick={() => changeQty(l.refId, -1)}>
+                        <Minus className="h-3 w-3" />
+                      </Button>
+                      <Input
+                        type="number" step="1" min="0" max={l.stock}
+                        value={l.qty}
+                        onChange={(e) => setQty(l.refId, Number(e.target.value) || 0)}
+                        className="h-7 w-14 text-center text-sm px-1"
+                      />
+                      <Button variant="outline" size="icon" className="h-7 w-7"
+                        onClick={() => changeQty(l.refId, 1)} disabled={l.qty >= l.stock}>
+                        <Plus className="h-3 w-3" />
+                      </Button>
+                      <span className="text-xs text-slate-500 ml-1">× {formatMoney(l.price, sym)}</span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm font-semibold text-slate-900">
+                      {formatMoney(l.qty * l.price, sym)}
+                    </div>
+                    <button
+                      onClick={() => removeLine(l.refId)}
+                      className="text-xs text-red-600 hover:text-red-700 mt-1"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-slate-200 p-4 bg-slate-50">
+          <div className="space-y-1.5 text-sm">
+            <div className="flex justify-between"><span className="text-slate-600">Subtotal</span><span className="font-medium">{formatMoney(totals.subtotal, sym)}</span></div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-600">Discount</span>
+              <Input type="number" step="0.01" min="0" value={discount}
+                onChange={(e) => setDiscount(Number(e.target.value) || 0)}
+                className="h-7 w-24 text-right" />
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-600">Tax %</span>
+              <Input type="number" step="0.01" min="0" value={taxRate}
+                onChange={(e) => setTaxRate(Number(e.target.value) || 0)}
+                className="h-7 w-24 text-right" />
+            </div>
+            <div className="flex justify-between text-slate-600 text-xs">
+              <span>Tax amount</span><span>{formatMoney(totals.tax, sym)}</span>
+            </div>
+            <div className="flex justify-between pt-2 mt-2 border-t border-slate-300">
+              <span className="text-lg font-semibold text-slate-900">Total</span>
+              <span className="text-2xl font-bold text-blue-700">{formatMoney(totals.total, sym)}</span>
+            </div>
+          </div>
+          <Button
+            className="w-full mt-3 h-12 text-base"
+            disabled={cart.length === 0 || methods.length === 0}
+            onClick={() => setPayOpen(true)}
+          >
+            <Receipt className="h-5 w-5" />
+            Charge {formatMoney(totals.total, sym)}
+          </Button>
+          {methods.length === 0 && (
+            <p className="text-xs text-amber-600 text-center mt-2">No active payment methods configured</p>
+          )}
+        </div>
+      </div>
+
+      {payOpen && cart.length > 0 && (
+        <PayDialog
+          total={totals.total}
+          methods={methods}
+          sym={sym}
+          customerId={customerId}
+          customers={customers}
+          cart={cart}
+          discount={discount}
+          taxRate={taxRate}
+          onClose={() => setPayOpen(false)}
+          onSuccess={(r) => {
+            persistLastReceipt(r);
+            setReceipt(r);
+            setPayOpen(false);
+            clearCart();
+            router.refresh();
+          }}
+        />
+      )}
+
+      {receipt && (
+        <ReceiptDialog
+          r={receipt}
+          sym={sym}
+          company={settings.company?.name || ""}
+          onClose={() => setReceipt(null)}
+        />
+      )}
+
+      {parkOpen && (
+        <ParkedDialog
+          parked={parked}
+          sym={sym}
+          onResume={resumeParked}
+          onDelete={deleteParked}
+          onClose={() => setParkOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* PAY DIALOG — picks method, then routes to cash/M-Pesa/etc sub-flow         */
+/* -------------------------------------------------------------------------- */
+function PayDialog({
+  total, methods, sym, customerId, customers, cart, discount, taxRate, onClose, onSuccess,
+}: {
+  total: number;
+  methods: PaymentMethod[];
+  sym: string;
+  customerId: string;
+  customers: Customer[];
+  cart: CartLine[];
+  discount: number;
+  taxRate: number;
+  onClose: () => void;
+  onSuccess: (r: LastReceipt) => void;
+}) {
+  const [methodId, setMethodId] = useState<string>(methods[0]?.id || "");
+  const method = methods.find((m) => m.id === methodId);
+  const customer = customers.find((c) => c.id === customerId);
+
+  const [tendered, setTendered] = useState<number>(total);
+  useEffect(() => { setTendered(total); }, [total, methodId]);
+  const change = Math.max(0, Math.round((tendered - total) * 100) / 100);
+
+  const [reference, setReference] = useState("");
+  const [phone, setPhone] = useState(customer?.phone || "");
+  const [pending, start] = useTransition();
+
+  // M-Pesa polling state
+  const [mpesaState, setMpesaState] = useState<
+    | { kind: "idle" }
+    | { kind: "pushing" }
+    | { kind: "polling"; checkoutRequestId: string; salesId: string; invoice_no: string; }
+    | { kind: "failed"; reason: string }
+  >({ kind: "idle" });
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  function quickTender(v: number) { setTendered(v); }
+  function bumpTo(rounded: number) { if (rounded >= total) setTendered(rounded); }
+  function quickChips() {
+    const denoms = [50, 100, 200, 500, 1000, 2000];
+    const ceil = (n: number) => Math.ceil(total / n) * n;
+    return Array.from(new Set([
+      total,
+      ...denoms.filter((d) => d >= total),
+      ceil(50), ceil(100), ceil(500), ceil(1000),
+    ])).sort((a, b) => a - b).slice(0, 8);
+  }
+
+  /* ----- CASH / OTHER ----- */
+  async function submitDirect() {
+    if (!methodId) return;
+    if (method?.requires_ref && !reference.trim()) {
+      toast.error(`Reference required for ${method.name}`);
+      return;
+    }
+    if (method?.kind === "cash" && tendered + 0.0001 < total) {
+      toast.error(`Tendered must be at least ${formatMoney(total, sym)}`);
+      return;
+    }
+    start(async () => {
+      const res = await checkoutPos({
+        customer_id: customerId || null,
+        lines: cart.map(({ refId, name, qty, price }) => ({ refId, name, qty, price })),
+        discount, tax_rate: taxRate,
+        payment_method_id: methodId,
+        reference: reference || null,
+        tendered_amount: method?.kind === "cash" ? tendered : total,
+      });
+      if (!res.ok) { toast.error(res.error || "Checkout failed"); return; }
+      toast.success(`Sale ${res.invoice_no} completed`);
+      onSuccess({
+        invoice_no: res.invoice_no!,
+        payment_no: res.payment_no!,
+        total: res.total ?? total,
+        tendered: res.tendered ?? total,
+        change_due: res.change_due ?? 0,
+        method_name: method?.name,
+        method_kind: method?.kind,
+        reference: reference || null,
+        date: new Date().toISOString(),
+      });
+    });
+  }
+
+  /* ----- M-PESA STK ----- */
+  async function startStk() {
+    if (!phone.trim()) { toast.error("Enter the customer's M-Pesa phone number"); return; }
+    setMpesaState({ kind: "pushing" });
+    const r = await posStkInitiate({
+      customer_id: customerId || null,
+      lines: cart.map(({ refId, name, qty, price }) => ({ refId, name, qty, price })),
+      discount, tax_rate: taxRate,
+      phone,
+      payment_method_id: methodId || null,
+    });
+    if (!r.ok || !r.checkoutRequestId || !r.sale_id) {
+      setMpesaState({ kind: "failed", reason: r.error || "STK push failed" });
+      return;
+    }
+    toast.success("STK push sent. Ask the customer to enter their PIN.");
+    const cri = r.checkoutRequestId;
+    setMpesaState({ kind: "polling", checkoutRequestId: cri, salesId: r.sale_id, invoice_no: r.invoice_no || "" });
+    let elapsed = 0;
+    pollRef.current = setInterval(async () => {
+      elapsed += 3;
+      const s = await posStkStatus(cri);
+      if (s.status === "success") {
+        if (pollRef.current) clearInterval(pollRef.current);
+        toast.success(`Sale ${s.invoice_no} completed via M-Pesa`);
+        onSuccess({
+          invoice_no: s.invoice_no,
+          payment_no: "",
+          total,
+          method_name: method?.name || "M-Pesa",
+          method_kind: "mpesa",
+          reference: s.mpesa_receipt_no || null,
+          mpesa_receipt_no: s.mpesa_receipt_no,
+          date: new Date().toISOString(),
+        });
+        return;
+      }
+      if (s.status === "failed" || s.status === "cancelled" || s.status === "timeout") {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setMpesaState({ kind: "failed", reason: s.result_desc });
+        return;
+      }
+      if (elapsed >= 90) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        setMpesaState({ kind: "failed", reason: "Timed out waiting for the customer to confirm" });
+      }
+    }, 3000);
+  }
+
+  function cancelStk() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setMpesaState({ kind: "idle" });
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="text-2xl">Charge {formatMoney(total, sym)}</DialogTitle>
+          <DialogDescription>Select payment method to complete the sale.</DialogDescription>
+        </DialogHeader>
+
+        {/* Method tiles */}
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+          {methods.map((m) => {
+            const Icon = KIND_ICON[m.kind] || Receipt;
+            const active = methodId === m.id;
+            return (
+              <button
+                key={m.id}
+                onClick={() => { setMethodId(m.id); setMpesaState({ kind: "idle" }); }}
+                className={cn(
+                  "flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 transition-colors",
+                  active
+                    ? "border-blue-500 bg-blue-50 text-blue-900"
+                    : "border-slate-200 bg-white hover:border-slate-300 text-slate-700"
+                )}
+              >
+                <Icon className={cn("h-5 w-5", active ? "text-blue-600" : "text-slate-400")} />
+                <span className="text-xs font-medium leading-tight text-center">{m.name}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Per-method body */}
+        {method?.kind === "cash" && (
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="tendered">Cash Tendered</Label>
+              <Input id="tendered" type="number" step="0.01" min={total}
+                value={tendered}
+                onChange={(e) => setTendered(Number(e.target.value) || 0)}
+                className="h-11 text-2xl font-mono text-right tabular-nums" />
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {quickChips().map((v) => (
+                <button key={v} type="button" onClick={() => quickTender(v)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-md text-sm font-medium border",
+                    tendered === v
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-white border-slate-200 hover:border-slate-300"
+                  )}>
+                  {v === total ? "Exact" : formatMoney(v, sym)}
+                </button>
+              ))}
+              <button type="button" onClick={() => bumpTo(Math.ceil(total))}
+                className="px-3 py-1.5 rounded-md text-sm font-medium border bg-white border-slate-200 hover:border-slate-300">
+                Round up
+              </button>
+            </div>
+            <div className={cn(
+              "rounded-lg p-4 text-center",
+              change > 0 ? "bg-emerald-50 border border-emerald-200" : "bg-slate-50 border border-slate-200"
+            )}>
+              <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">Change due</div>
+              <div className={cn(
+                "text-3xl font-bold tabular-nums",
+                change > 0 ? "text-emerald-700" : "text-slate-400"
+              )}>
+                {formatMoney(change, sym)}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {method?.kind === "mpesa" && method.meta?.transaction_type && mpesaState.kind === "idle" && (
+          <div className="space-y-3">
+            {/* Big amount-to-be-paid panel — Daraja STK shows the same number on the customer's phone. */}
+            <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-4 text-center">
+              <div className="text-xs uppercase tracking-wider text-emerald-700 font-semibold">
+                {(method.meta?.label as string) || (method.meta?.transaction_type === "CustomerBuyGoodsOnline" ? "Lipa Na M-Pesa · Buy Goods (Till)" : "Lipa Na M-Pesa · PayBill")}
+              </div>
+              <div className="text-3xl font-bold text-emerald-700 tabular-nums mt-1">{formatMoney(total, sym)}</div>
+              {method.meta?.shortcode ? (
+                <div className="text-[11px] text-emerald-700/80 mt-1">
+                  {method.meta.transaction_type === "CustomerBuyGoodsOnline" ? "Till" : "PayBill"}: <span className="font-mono">{String(method.meta.shortcode)}</span>
+                </div>
+              ) : null}
+            </div>
+            <div>
+              <Label htmlFor="phone">Customer M-Pesa Phone</Label>
+              <Input id="phone" autoFocus type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="07XXXXXXXX or 2547XXXXXXXX"
+                className="h-11 text-lg font-mono" />
+            </div>
+            <p className="text-xs text-slate-500">
+              We&rsquo;ll push an STK prompt to this phone for the amount above. The customer enters
+              their M-Pesa PIN on their handset and the sale finalizes automatically.
+            </p>
+          </div>
+        )}
+
+        {method?.kind === "mpesa" && method.meta?.transaction_type && mpesaState.kind === "pushing" && (
+          <div className="py-6 text-center">
+            <Loader2 className="h-10 w-10 mx-auto text-blue-600 animate-spin mb-2" />
+            <div className="text-sm text-slate-700">Sending STK push to {phone} for {formatMoney(total, sym)}…</div>
+          </div>
+        )}
+
+        {method?.kind === "mpesa" && method.meta?.transaction_type && mpesaState.kind === "polling" && (
+          <div className="py-4 text-center space-y-3">
+            <Loader2 className="h-10 w-10 mx-auto text-emerald-600 animate-spin" />
+            <div>
+              <div className="text-sm font-medium text-slate-900">Waiting for customer to enter PIN…</div>
+              <div className="text-xs text-slate-500 mt-1">Invoice {mpesaState.invoice_no} · {formatMoney(total, sym)}</div>
+            </div>
+            <Button type="button" variant="outline" size="sm" onClick={cancelStk}>
+              <XCircle className="h-4 w-4" /> Cancel waiting
+            </Button>
+          </div>
+        )}
+
+        {method?.kind === "mpesa" && method.meta?.transaction_type && mpesaState.kind === "failed" && (
+          <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">
+            <div className="font-semibold mb-1">M-Pesa payment failed</div>
+            <div>{mpesaState.reason}</div>
+            <Button variant="outline" size="sm" className="mt-2" onClick={() => setMpesaState({ kind: "idle" })}>
+              Try again
+            </Button>
+          </div>
+        )}
+
+        {/* M-Pesa MANUAL (no STK push) — customer paid you separately, type the M-Pesa code. */}
+        {method?.kind === "mpesa" && !method.meta?.transaction_type && (
+          <div className="space-y-3">
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-center">
+              <div className="text-[11px] uppercase tracking-wider text-amber-800 font-semibold">M-Pesa · Manual reference</div>
+              <div className="text-2xl font-bold text-amber-800 tabular-nums mt-1">{formatMoney(total, sym)}</div>
+              <div className="text-[11px] text-amber-700/80 mt-1">
+                No STK push will be sent. Type the M-Pesa code the customer received.
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="reference">M-Pesa Receipt Code *</Label>
+              <Input id="reference" autoFocus
+                value={reference}
+                onChange={(e) => setReference(e.target.value.toUpperCase())}
+                placeholder="e.g. QGH7K2L9P3"
+                className="h-11 text-lg font-mono uppercase" />
+            </div>
+          </div>
+        )}
+
+        {/* Generic reference for bank/card/other */}
+        {method && method.kind !== "cash" && method.kind !== "mpesa" && method.requires_ref && (
+          <div>
+            <Label htmlFor="reference">Reference / Receipt code *</Label>
+            <Input id="reference" autoFocus
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="e.g. transaction id" />
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}
+            disabled={mpesaState.kind === "polling" || mpesaState.kind === "pushing"}>
+            Cancel
+          </Button>
+          {method?.kind === "mpesa" && method.meta?.transaction_type ? (
+            mpesaState.kind === "idle" || mpesaState.kind === "failed" ? (
+              <Button onClick={startStk}
+                disabled={!phone.trim() || pending || mpesaState.kind === "pushing" || mpesaState.kind === "polling"}>
+                <Smartphone className="h-4 w-4" /> Send STK push
+              </Button>
+            ) : null
+          ) : (
+            <Button
+              disabled={
+                !methodId || pending
+                || (method?.kind === "cash" && tendered + 0.0001 < total)
+                || (method?.kind === "mpesa" && !method.meta?.transaction_type && !reference.trim())
+                || (method?.requires_ref && !reference.trim())
+              }
+              onClick={submitDirect}>
+              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+              Complete Sale
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* RECEIPT                                                                    */
+/* -------------------------------------------------------------------------- */
+function ReceiptDialog({
+  r, sym, company, onClose,
+}: {
+  r: LastReceipt;
+  sym: string;
+  company: string;
+  onClose: () => void;
+}) {
+  function printReceipt() {
+    if (typeof window === "undefined") return;
+    const win = window.open("", "_blank", "width=320,height=600");
+    if (!win) return;
+    const html = `<!doctype html><html><head><title>${r.invoice_no}</title>
+      <style>
+        body { font-family: ui-monospace, monospace; font-size: 12px; padding: 8px; }
+        h1 { font-size: 14px; text-align: center; margin: 0 0 8px; }
+        .row { display: flex; justify-content: space-between; padding: 2px 0; }
+        .total { border-top: 1px dashed #999; margin-top: 6px; padding-top: 6px; font-weight: bold; }
+        .small { color: #555; font-size: 11px; }
+      </style></head><body>
+      <h1>${escapeHtml(company || "Receipt")}</h1>
+      <div class="row"><span>Invoice</span><span>${escapeHtml(r.invoice_no)}</span></div>
+      ${r.payment_no ? `<div class="row"><span>Payment</span><span>${escapeHtml(r.payment_no)}</span></div>` : ""}
+      <div class="row small"><span>${new Date(r.date).toLocaleString()}</span></div>
+      <div class="row total"><span>Total</span><span>${sym}${(r.total || 0).toFixed(2)}</span></div>
+      ${r.method_name ? `<div class="row"><span>Method</span><span>${escapeHtml(r.method_name)}</span></div>` : ""}
+      ${r.tendered != null ? `<div class="row"><span>Tendered</span><span>${sym}${r.tendered.toFixed(2)}</span></div>` : ""}
+      ${r.change_due ? `<div class="row"><span>Change</span><span>${sym}${r.change_due.toFixed(2)}</span></div>` : ""}
+      ${r.mpesa_receipt_no ? `<div class="row"><span>M-Pesa code</span><span>${escapeHtml(r.mpesa_receipt_no)}</span></div>` : ""}
+      ${r.reference ? `<div class="row"><span>Ref</span><span>${escapeHtml(r.reference)}</span></div>` : ""}
+      <p style="text-align:center;margin-top:12px" class="small">Thank you!</p>
+      <script>window.onload = () => { window.print(); };</script>
+      </body></html>`;
+    win.document.write(html);
+    win.document.close();
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-sm">
+        <div className="text-center">
+          <div className="mx-auto h-16 w-16 rounded-full bg-emerald-100 flex items-center justify-center">
+            <CheckCircle2 className="h-9 w-9 text-emerald-600" />
+          </div>
+          <h2 className="text-xl font-semibold text-slate-900 mt-2">Sale completed</h2>
+          <p className="text-sm text-slate-500">Receipt has been recorded.</p>
+        </div>
+
+        <div className="bg-slate-50 rounded-lg p-4 my-2 text-sm space-y-1">
+          <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-mono font-medium">{r.invoice_no}</span></div>
+          {r.payment_no && (
+            <div className="flex justify-between"><span className="text-slate-500">Payment</span><span className="font-mono font-medium">{r.payment_no}</span></div>
+          )}
+          {r.method_name && (
+            <div className="flex justify-between"><span className="text-slate-500">Method</span><span className="font-medium">{r.method_name}</span></div>
+          )}
+          {r.mpesa_receipt_no && (
+            <div className="flex justify-between"><span className="text-slate-500">M-Pesa</span><span className="font-mono font-medium text-emerald-700">{r.mpesa_receipt_no}</span></div>
+          )}
+          <div className="flex justify-between pt-2 mt-1 border-t border-slate-200">
+            <span className="text-slate-700 font-medium">Total</span>
+            <span className="text-lg font-bold text-blue-700">{formatMoney(r.total, sym)}</span>
+          </div>
+          {r.tendered != null && r.tendered > 0 && (
+            <div className="flex justify-between text-xs">
+              <span className="text-slate-500">Tendered</span>
+              <span className="font-mono">{formatMoney(r.tendered, sym)}</span>
+            </div>
+          )}
+          {r.change_due && r.change_due > 0 && (
+            <div className="flex justify-between bg-emerald-50 rounded px-2 py-1.5">
+              <span className="text-emerald-800 font-semibold">Change</span>
+              <span className="font-bold text-emerald-700 text-base tabular-nums">{formatMoney(r.change_due, sym)}</span>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="sm:justify-between gap-2">
+          <Button variant="outline" onClick={printReceipt} className="flex-1">
+            <Printer className="h-4 w-4" /> Print
+          </Button>
+          <Button onClick={onClose} className="flex-1">
+            <Receipt className="h-4 w-4" /> New Sale
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]!));
+}
+
+/* -------------------------------------------------------------------------- */
+/* PARKED SALES                                                               */
+/* -------------------------------------------------------------------------- */
+function ParkedDialog({
+  parked, sym, onResume, onDelete, onClose,
+}: {
+  parked: ParkedSale[];
+  sym: string;
+  onResume: (p: ParkedSale) => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Parked sales</DialogTitle>
+          <DialogDescription>Resume a previously held sale or discard it.</DialogDescription>
+        </DialogHeader>
+        {parked.length === 0 ? (
+          <p className="text-sm text-slate-500 text-center py-6">No parked sales yet.</p>
+        ) : (
+          <div className="space-y-2 max-h-[400px] overflow-y-auto">
+            {parked.map((p) => {
+              const total = p.cart.reduce((s, l) => s + l.qty * l.price, 0) - p.discount;
+              return (
+                <div key={p.id} className="flex items-center justify-between gap-2 p-3 border rounded-lg">
+                  <div className="text-sm">
+                    <div className="font-medium">{p.cart.length} item{p.cart.length === 1 ? "" : "s"} · {formatMoney(total, sym)}</div>
+                    <div className="text-xs text-slate-500">{new Date(p.savedAt).toLocaleString()}</div>
+                  </div>
+                  <div className="flex gap-1">
+                    <Button size="sm" onClick={() => onResume(p)}>
+                      <Play className="h-3.5 w-3.5" /> Resume
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => onDelete(p.id)} className="text-red-600">
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent      </DialogContent>
+    </Dialog>
+  );
+}

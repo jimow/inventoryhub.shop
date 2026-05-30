@@ -1,0 +1,508 @@
+"use client";
+
+import { useMemo, useState, useTransition } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Pencil, Plus, Eye, X, Send, PackageCheck, Wallet, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
+
+import { DataTable, type Column, type FilterDef, type BulkAction } from "@/components/data-table";
+import { DeleteButton } from "@/components/delete-button";
+import { PageHeader } from "@/components/page-header";
+import { ExportButton } from "@/components/export-button";
+
+import type { Purchase, PurchaseLine, PurchaseType, Supplier, SettingsData } from "@/lib/types";
+import type { PermissionMatrix } from "@/lib/permissions";
+import { can } from "@/lib/permissions";
+import { formatMoney, formatDate } from "@/lib/utils";
+import {
+  createPurchase, updatePurchase, deletePurchase,
+  markOrdered, receivePurchase, cancelPurchase, recordPurchasePayment,
+  bulkCancelPurchases, bulkDeletePurchases, exportPurchases,
+} from "./actions";
+
+type Mode = "view" | "edit" | "create" | "pay" | null;
+
+const STATUS_OPTIONS = [
+  { value: "draft", label: "Draft" },
+  { value: "ordered", label: "Ordered" },
+  { value: "received", label: "Received (Unpaid)" },
+  { value: "paid", label: "Paid" },
+  { value: "cancelled", label: "Cancelled" },
+];
+const TYPE_OPTIONS = [
+  { value: "cash", label: "Cash" },
+  { value: "credit", label: "Credit" },
+];
+
+function isOverdue(po: Purchase) {
+  if (!po.due_date) return false;
+  if (po.status === "paid" || po.status === "cancelled") return false;
+  return new Date(po.due_date) < new Date(new Date().toISOString().slice(0, 10));
+}
+
+export function PurchasesClient({
+  purchases, totalCount, suppliers, items, settings, permissions,
+}: {
+  purchases: Purchase[];
+  totalCount: number;
+  suppliers: Supplier[];
+  products: Product[];
+  settings: SettingsData;
+  permissions: PermissionMatrix;
+}) {
+  const sp = useSearchParams();
+  const [active, setActive] = useState<Purchase | null>(null);
+  const [mode, setMode] = useState<Mode>(null);
+  const sym = settings.currency?.symbol;
+
+  const columns: Column<Purchase>[] = [
+    { key: "po_no", label: "PO #", className: "w-[140px] font-medium" },
+    { key: "date", label: "Date", className: "w-[110px]", render: (r) => formatDate(r.date) },
+    { key: "supplier", label: "Supplier",
+      render: (r) => suppliers.find((s) => s.id === r.supplier_id)?.name || "-" },
+    { key: "purchase_type", label: "Type", className: "w-[90px]",
+      render: (r) => <TypeBadge type={r.purchase_type} /> },
+    { key: "total", label: "Total", className: "w-[120px] text-right",
+      render: (r) => formatMoney(r.total, sym) },
+    { key: "balance", label: "Balance", className: "w-[120px] text-right",
+      render: (r) => {
+        const bal = Number(r.total) - Number(r.amount_paid || 0);
+        if (r.status === "cancelled") return <span className="text-muted-foreground">—</span>;
+        if (bal <= 0.001) return <span className="text-emerald-700">Paid</span>;
+        return <span className={isOverdue(r) ? "text-red-600 font-medium" : ""}>{formatMoney(bal, sym)}</span>;
+      } },
+    { key: "status", label: "Status", className: "w-[140px]",
+      render: (r) => <StatusBadge po={r} /> },
+  ];
+
+  const filters: FilterDef[] = [
+    { key: "status", label: "Status", options: STATUS_OPTIONS },
+    { key: "purchase_type", label: "Type", options: TYPE_OPTIONS },
+    { key: "supplier_id", label: "Supplier",
+      options: suppliers.map((s) => ({ value: s.id, label: s.name })) },
+  ];
+
+  const bulkActions: BulkAction<Purchase>[] = [];
+  if (can(permissions, "purchases", "edit")) {
+    bulkActions.push({ label: "Cancel", icon: X, variant: "outline",
+      run: (rows) => bulkCancelPurchases(rows.map((r) => r.id)) });
+  }
+  if (can(permissions, "purchases", "delete")) {
+    bulkActions.push({ label: "Delete", icon: Trash2, variant: "destructive",
+      run: (rows) => bulkDeletePurchases(rows.map((r) => r.id)) });
+  }
+
+  return (
+    <div>
+      <PageHeader title="Purchases" description="Cash and credit purchase orders">
+        <ExportButton action={() => exportPurchases(
+          sp.get("q") || undefined, sp.get("status") || undefined, sp.get("purchase_type") || undefined,
+          sp.get("supplier_id") || undefined, sp.get("from") || undefined, sp.get("to") || undefined,
+        )} />
+        {can(permissions, "purchases", "create") && (
+          <Button size="sm" onClick={() => { setActive(null); setMode("create"); }}>
+            <Plus className="h-4 w-4" /> New Purchase
+          </Button>
+        )}
+      </PageHeader>
+
+      <DataTable<Purchase>
+        columns={columns}
+        data={purchases}
+        totalCount={totalCount}
+        searchPlaceholder="Search by PO number..."
+        filters={filters}
+        bulkActions={bulkActions}
+        rowActions={(row) => (
+          <PurchaseRowActions row={row} permissions={permissions}
+            onView={() => { setActive(row); setMode("view"); }}
+            onEdit={() => { setActive(row); setMode("edit"); }}
+            onPay={() => { setActive(row); setMode("pay"); }} />
+        )}
+      />
+
+      {mode === "create" && (
+        <PurchaseEditor purchase={null} suppliers={suppliers} products={products} settings={settings}
+          onClose={() => setMode(null)} />
+      )}
+      {mode === "edit" && active && (
+        <PurchaseEditor purchase={active} suppliers={suppliers} products={products} settings={settings}
+          onClose={() => { setMode(null); setActive(null); }} />
+      )}
+      {mode === "view" && active && (
+        <PurchaseViewer purchase={active} suppliers={suppliers} settings={settings}
+          onClose={() => { setMode(null); setActive(null); }} />
+      )}
+      {mode === "pay" && active && (
+        <PaymentDialog po={active} settings={settings}
+          onClose={() => { setMode(null); setActive(null); }} />
+      )}
+    </div>
+  );
+}
+
+function TypeBadge({ type }: { type: PurchaseType }) {
+  const v = ({ cash: "success", credit: "warning" } as const)[type];
+  return <Badge variant={v}>{type}</Badge>;
+}
+
+function StatusBadge({ po }: { po: Purchase }) {
+  if (isOverdue(po)) return <Badge variant="danger">overdue</Badge>;
+  const map: Record<string, "secondary" | "info" | "success" | "danger" | "warning"> = {
+    draft: "secondary", ordered: "info", received: "warning", paid: "success", cancelled: "danger",
+  };
+  const label = po.status === "received" ? "unpaid" : po.status;
+  return <Badge variant={map[po.status] || "secondary"}>{label}</Badge>;
+}
+
+function PurchaseRowActions({
+  row, permissions, onView, onEdit, onPay,
+}: {
+  row: Purchase; permissions: PermissionMatrix;
+  onView: () => void; onEdit: () => void; onPay: () => void;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  function run(fn: () => Promise<{ ok: boolean; error?: string }>, success: string) {
+    start(async () => {
+      const r = await fn();
+      if (!r.ok) { toast.error(r.error || "Failed"); return; }
+      toast.success(success);
+      router.refresh();
+    });
+  }
+  return (
+    <>
+      <Button variant="ghost" size="icon" onClick={onView} title="View"><Eye className="h-4 w-4" /></Button>
+      {row.status === "draft" && can(permissions, "purchases", "edit") && (
+        <>
+          <Button variant="ghost" size="icon" onClick={onEdit} title="Edit"><Pencil className="h-4 w-4" /></Button>
+          <Button variant="ghost" size="icon" disabled={pending} onClick={() => run(() => markOrdered(row.id), "Marked ordered")} title="Mark Ordered" className="text-blue-600"><Send className="h-4 w-4" /></Button>
+        </>
+      )}
+      {row.status === "ordered" && can(permissions, "purchases", "edit") && (
+        <Button variant="ghost" size="icon" disabled={pending} onClick={() => run(() => receivePurchase(row.id), "Received")} title="Receive" className="text-emerald-600"><PackageCheck className="h-4 w-4" /></Button>
+      )}
+      {row.status === "received" && can(permissions, "purchases", "edit") && (
+        <Button variant="ghost" size="icon" disabled={pending} onClick={onPay} title="Record payment" className="text-emerald-600"><Wallet className="h-4 w-4" /></Button>
+      )}
+      {row.status !== "cancelled" && can(permissions, "purchases", "edit") && (
+        <Button variant="ghost" size="icon" disabled={pending} onClick={() => run(() => cancelPurchase(row.id), "Cancelled")} title="Cancel" className="text-amber-600"><X className="h-4 w-4" /></Button>
+      )}
+      {can(permissions, "purchases", "delete") && (
+        <DeleteButton action={() => deletePurchase(row.id)} message="Stock will be reverted if this PO was received/paid." />
+      )}
+    </>
+  );
+}
+
+function PaymentDialog({ po, settings, onClose }: { po: Purchase; settings: SettingsData; onClose: () => void }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const balance = Number(po.total) - Number(po.amount_paid || 0);
+  const [amount, setAmount] = useState(balance.toFixed(2));
+  const sym = settings.currency?.symbol;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    start(async () => {
+      const r = await recordPurchasePayment(po.id, Number(amount));
+      if (!r.ok) { toast.error(r.error || "Failed"); return; }
+      toast.success("Payment recorded");
+      onClose();
+      router.refresh();
+    });
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Record Payment — {po.po_no}</DialogTitle>
+          <DialogDescription>Outstanding balance: <b>{formatMoney(balance, sym)}</b></DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-3">
+          <div>
+            <Label htmlFor="amt">Payment Amount</Label>
+            <Input id="amt" type="number" step="0.01" min="0.01" max={balance.toFixed(2)}
+              value={amount} onChange={(e) => setAmount(e.target.value)} required />
+          </div>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setAmount(balance.toFixed(2))}>Pay full</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setAmount((balance / 2).toFixed(2))}>Pay half</Button>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={pending}>{pending ? "Saving..." : "Record"}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PurchaseViewer({ purchase, suppliers, settings, onClose }: { purchase: Purchase; suppliers: Supplier[]; settings: SettingsData; onClose: () => void }) {
+  const sup = suppliers.find((s) => s.id === purchase.supplier_id);
+  const sym = settings.currency?.symbol;
+  const balance = Number(purchase.total) - Number(purchase.amount_paid || 0);
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            Purchase {purchase.po_no} <TypeBadge type={purchase.purchase_type} /> <StatusBadge po={purchase} />
+          </DialogTitle>
+          <DialogDescription>{formatDate(purchase.date)} {purchase.due_date && `· due ${formatDate(purchase.due_date)}`}</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-3 text-sm mb-3">
+          <div><b>Supplier:</b> {sup?.name || "-"}</div>
+          <div><b>Email:</b> {sup?.email || "-"}</div>
+        </div>
+        <table className="w-full text-sm border-t">
+          <thead className="bg-slate-50">
+            <tr>
+              <th className="text-left p-2">Item</th>
+              <th className="text-right p-2 w-20">Qty</th>
+              <th className="text-right p-2 w-24">Cost</th>
+              <th className="text-right p-2 w-24">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(purchase.items || []).map((l, i) => (
+              <tr key={i} className="border-t">
+                <td className="p-2">{l.name}</td>
+                <td className="p-2 text-right">{l.qty}</td>
+                <td className="p-2 text-right">{formatMoney(l.price, sym)}</td>
+                <td className="p-2 text-right">{formatMoney(Number(l.qty) * Number(l.price), sym)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="bg-slate-100 rounded-md p-3 mt-2 text-sm">
+          <div className="flex justify-between"><span>Subtotal</span><span>{formatMoney(purchase.subtotal, sym)}</span></div>
+          <div className="flex justify-between"><span>Discount</span><span>{formatMoney(purchase.discount, sym)}</span></div>
+          <div className="flex justify-between"><span>Tax ({purchase.tax_rate}%)</span><span>{formatMoney(purchase.tax, sym)}</span></div>
+          <div className="flex justify-between font-semibold pt-2 mt-2 border-t border-slate-300">
+            <span>Total</span><span>{formatMoney(purchase.total, sym)}</span>
+          </div>
+          {purchase.purchase_type === "credit" && (
+            <>
+              <div className="flex justify-between text-emerald-700"><span>Amount Paid</span><span>{formatMoney(purchase.amount_paid, sym)}</span></div>
+              <div className="flex justify-between font-semibold"><span>Balance</span>
+                <span className={balance > 0.001 ? "text-red-600" : "text-emerald-700"}>{formatMoney(balance, sym)}</span></div>
+            </>
+          )}
+        </div>
+        {purchase.notes && <div className="mt-3 text-sm"><b>Notes:</b> {purchase.notes}</div>}
+        <DialogFooter><Button variant="outline" onClick={onClose}>Close</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PurchaseEditor({
+  purchase, suppliers, products, settings, onClose,
+}: {
+  purchase: Purchase | null;
+  suppliers: Supplier[];
+  products: Product[];
+  settings: SettingsData;
+  onClose: () => void;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const sym = settings.currency?.symbol;
+  const [lines, setLines] = useState<PurchaseLine[]>(purchase?.items || []);
+  const [discount, setDiscount] = useState(Number(purchase?.discount ?? 0));
+  const [taxRate, setTaxRate] = useState(Number(purchase?.tax_rate ?? settings.tax?.defaultRate ?? 0));
+  const [purchaseType, setPurchaseType] = useState<PurchaseType>(purchase?.purchase_type || "cash");
+  const [supplierId, setSupplierId] = useState<string>(purchase?.supplier_id || "");
+
+  const totals = useMemo(() => {
+    const subtotal = lines.reduce((s, l) => s + Number(l.qty) * Number(l.price), 0);
+    const base = Math.max(0, subtotal - discount);
+    const tax = (base * taxRate) / 100;
+    return { subtotal, tax, total: base + tax };
+  }, [lines, discount, taxRate]);
+
+  function addLineAfter(index: number) {
+    const blank: PurchaseLine = { refId: "", name: "", qty: 1, price: 0 };
+    if (index < 0) setLines([...lines, blank]);
+    else setLines([...lines.slice(0, index + 1), blank, ...lines.slice(index + 1)]);
+  }
+
+  function pickItem(index: number, itemId: string) {
+    if (!itemId) return;
+    const it = items.find((x) => x.id === itemId);
+    if (!it) return;
+    const dupIndex = lines.findIndex((l, i) => i !== index && l.refId === itemId);
+    if (dupIndex >= 0) {
+      const next = [...lines];
+      const addQty = Number(next[index].qty) || 1;
+      next[dupIndex] = { ...next[dupIndex], qty: Number(next[dupIndex].qty) + addQty };
+      next.splice(index, 1);
+      setLines(next);
+      toast.info(`Added ${addQty} to existing ${it.name}`);
+      return;
+    }
+    const next = [...lines];
+    next[index] = {
+      refId: it.id,
+      name: it.name,
+      qty: Number(next[index].qty) || 1,
+      price: Number(it.cost_price),
+    };
+    setLines(next);
+  }
+
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const filled = lines.filter((l) => l.refId);
+    if (!filled.length) { toast.error("Add at least one item line"); return; }
+    if (!supplierId) { toast.error("Select a supplier"); return; }
+    const fd = new FormData(e.currentTarget);
+    fd.set("items", JSON.stringify(filled));
+    fd.set("supplier_id", supplierId);
+    start(async () => {
+      const r = purchase ? await updatePurchase(purchase.id, fd) : await createPurchase(fd);
+      if (!r.ok) { toast.error(r.error || "Save failed"); return; }
+      toast.success(purchase ? "Purchase updated" : "Purchase created");
+      onClose();
+      router.refresh();
+    });
+  }
+
+  const itemOptions: ComboboxOption[] = items.map((it) => ({
+    value: it.id,
+    label: it.name,
+    sub: `${it.code} · ${formatMoney(it.cost_price, sym)} · ${it.unit}`,
+  }));
+
+  const supplierOptions: ComboboxOption[] = suppliers.map((s) => ({
+    value: s.id,
+    label: s.name,
+    sub: s.email || s.phone || s.code,
+  }));
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{purchase ? `Edit Purchase ${purchase.po_no}` : "New Purchase"}</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={onSubmit} className="grid grid-cols-12 gap-3">
+          <div className="col-span-3"><Label htmlFor="po_no">PO #</Label>
+            <Input id="po_no" name="po_no" defaultValue={purchase?.po_no || ""} placeholder="(auto)" readOnly={!!purchase} />
+          </div>
+          <div className="col-span-3"><Label htmlFor="date">Date</Label>
+            <Input id="date" name="date" type="date" defaultValue={purchase?.date || new Date().toISOString().slice(0, 10)} />
+          </div>
+          <div className="col-span-3"><Label htmlFor="purchase_type">Type *</Label>
+            <Select id="purchase_type" name="purchase_type" value={purchaseType} onChange={(e) => setPurchaseType(e.target.value as PurchaseType)} required>
+              <option value="cash">Cash (paid on receipt)</option>
+              <option value="credit">Credit (track balance)</option>
+            </Select>
+          </div>
+          <div className="col-span-3"><Label htmlFor="due_date">Due Date</Label>
+            <Input id="due_date" name="due_date" type="date" disabled={purchaseType !== "credit"} defaultValue={purchase?.due_date || ""} />
+          </div>
+
+          <div className="col-span-12">
+            <Label>Supplier *</Label>
+            <Combobox
+              value={supplierId}
+              onChange={setSupplierId}
+              options={supplierOptions}
+              placeholder="Search supplier by name, email, code..."
+              emptyText="No suppliers match"
+            />
+          </div>
+
+          <div className="col-span-12">
+            <Label className="block mb-1">Line Items</Label>
+            <div className="space-y-2">
+              {lines.length === 0 ? (
+                <div className="border rounded-md p-4 text-center bg-slate-50">
+                  <p className="text-sm text-muted-foreground mb-2">No items yet</p>
+                  <Button type="button" size="sm" variant="outline" onClick={() => addLineAfter(-1)}>
+                    <Plus className="h-3 w-3" /> Add first line
+                  </Button>
+                </div>
+              ) : (
+                lines.map((l, i) => (
+                  <div key={i} className="grid grid-cols-12 gap-2 bg-slate-50 p-2 rounded-md items-center">
+                    <Combobox
+                      className="col-span-5"
+                      value={l.refId}
+                      onChange={(v) => pickItem(i, v)}
+                      options={itemOptions}
+                      placeholder="Search item..."
+                    />
+                    <Input className="col-span-2" type="number" step="0.01" min="0" value={l.qty} placeholder="Qty"
+                      onChange={(e) => {
+                        const next = [...lines]; next[i] = { ...next[i], qty: Number(e.target.value) || 0 }; setLines(next);
+                      }} />
+                    <Input className="col-span-2" type="number" step="0.01" min="0" value={l.price} placeholder="Cost"
+                      onChange={(e) => {
+                        const next = [...lines]; next[i] = { ...next[i], price: Number(e.target.value) || 0 }; setLines(next);
+                      }} />
+                    <div className="col-span-1 text-right text-sm font-medium">
+                      {formatMoney(Number(l.qty) * Number(l.price), sym)}
+                    </div>
+                    <div className="col-span-2 flex justify-end gap-1">
+                      <Button type="button" variant="ghost" size="icon" title="Remove line"
+                        className="text-red-600 hover:text-red-700"
+                        onClick={() => setLines(lines.filter((_, j) => j !== i))}>
+                        <X className="h-4 w-4" />
+                      </Button>
+                      <Button type="button" variant="ghost" size="icon" title="Add line below"
+                        onClick={() => addLineAfter(i)}>
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="col-span-8"><Label htmlFor="notes">Notes</Label>
+            <Textarea id="notes" name="notes" defaultValue={purchase?.notes ?? ""} rows={3} />
+          </div>
+          <div className="col-span-4 bg-slate-100 rounded-md p-3 text-sm space-y-1">
+            <div className="flex justify-between"><span>Subtotal</span><span>{formatMoney(totals.subtotal, sym)}</span></div>
+            <div className="flex justify-between items-center gap-2">
+              <span>Discount</span>
+              <Input className="h-7 w-24" type="number" step="0.01" min="0" name="discount" value={discount} onChange={(e) => setDiscount(Number(e.target.value) || 0)} />
+            </div>
+            <div className="flex justify-between items-center gap-2">
+              <span>Tax %</span>
+              <Input className="h-7 w-24" type="number" step="0.01" min="0" name="tax_rate" value={taxRate} onChange={(e) => setTaxRate(Number(e.target.value) || 0)} />
+            </div>
+            <div className="flex justify-between font-semibold pt-2 mt-2 border-t border-slate-300">
+              <span>Total</span><span>{formatMoney(totals.total, sym)}</span>
+            </div>
+          </div>
+
+          <div className="col-span-12">
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+              <Button type="submit" disabled={pending}>{pending ? "Saving..." : "Save"}</Button>
+            </DialogFooter>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

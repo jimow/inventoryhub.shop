@@ -1,0 +1,20 @@
+{
+  "schema": "shop_mombasa",
+  "template": "public",
+  "company": {
+    "name": "Mombasa Hardware",
+    "address": "Nyali Road, Mombasa",
+    "phone": "+254 700 000 000",
+    "email": "info@mombasahardware.co.ke",
+    "taxId": "P05XXXXXXX"
+  },
+  "currency": { "symbol": "KSh", "code": "KES", "position": "before" },
+  "tax": { "defaultRate": 16, "name": "VAT" },
+  "locale": { "country": "KE", "language": "en", "timeFormat": "24h" },
+  "admin": {
+    "email": "owner@mombasahardware.co.ke",
+    "password": "change-me-now",
+    "fullName": "Shop Owner",
+    "username": "owner"
+  }
+}
