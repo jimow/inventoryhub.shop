@@ -85,12 +85,15 @@ function netByAccount(lines: JournalLine[]): Map<string, { debit: number; credit
 /* -------------------------------------------------------------------------- */
 /* MAIN                                                                        */
 /* -------------------------------------------------------------------------- */
+type BankOpening = { account_id: string; opening_balance: number };
+
 export function ReportsClient({
-  accounts, lines, entries, settings,
+  accounts, lines, entries, bankOpenings, settings,
 }: {
   accounts: Account[];
   lines: JournalLine[];
   entries: JournalEntry[];
+  bankOpenings: BankOpening[];
   settings: SettingsData;
 }) {
   const [tab, setTab] = useState<Tab>("summary");
@@ -228,7 +231,7 @@ export function ReportsClient({
 
       {/* Reports */}
       {tab === "summary" && (
-        <AccountSummary accounts={accounts} lines={lines} sym={sym} />
+        <AccountSummary accounts={accounts} lines={lines} bankOpenings={bankOpenings} sym={sym} />
       )}
       {tab === "trial" && (
         <TrialBalance
@@ -251,6 +254,7 @@ export function ReportsClient({
           accounts={accounts}
           lines={lines}
           entryDateMap={entryDateMap}
+          bankOpenings={bankOpenings}
           asOf={asOf} sym={sym}
         />
       )}
@@ -281,10 +285,16 @@ export function ReportsClient({
 /* REPORT 1: Account Balances                                                  */
 /* -------------------------------------------------------------------------- */
 function AccountSummary({
-  accounts, lines, sym,
-}: { accounts: Account[]; lines: JournalLine[]; sym: string }) {
+  accounts, lines, bankOpenings, sym,
+}: { accounts: Account[]; lines: JournalLine[]; bankOpenings: BankOpening[]; sym: string }) {
   const totals = netByAccount(lines);
   const groups: Account["type"][] = ["asset", "liability", "equity", "income", "expense"];
+
+  const openingByAccount = new Map<string, number>();
+  for (const b of bankOpenings) {
+    openingByAccount.set(b.account_id, (openingByAccount.get(b.account_id) || 0) + Number(b.opening_balance));
+  }
+  const openingEquityTotal = bankOpenings.reduce((s, b) => s + Number(b.opening_balance), 0);
 
   function rowsFor(type: Account["type"]) {
     return accounts
@@ -294,7 +304,8 @@ function AccountSummary({
         const net = t.debit - t.credit;
         // For credit-normal accounts (liability/equity/income), balance = -net
         const isCredit = type === "liability" || type === "equity" || type === "income";
-        return { ...a, balance: isCredit ? -net : net };
+        const opening = type === "asset" ? (openingByAccount.get(a.id) || 0) : 0;
+        return { ...a, balance: (isCredit ? -net : net) + opening };
       });
   }
 
@@ -306,8 +317,14 @@ function AccountSummary({
       </div>
       {groups.map((g) => {
         const rows = rowsFor(g);
-        if (rows.length === 0) return null;
-        const total = rows.reduce((s, r) => s + r.balance, 0);
+        // Surface bank opening balances as their own equity line so this view's
+        // cash matches the Dashboard / Balance Sheet.
+        const extra = g === "equity" && Math.abs(openingEquityTotal) > 0.001
+          ? [{ id: "__opening_equity__", code: "—", name: "Opening Balance Equity (bank)", balance: openingEquityTotal }]
+          : [];
+        const allRows = [...rows, ...extra];
+        if (allRows.length === 0) return null;
+        const total = allRows.reduce((s, r) => s + r.balance, 0);
         return (
           <div key={g} className="border-t">
             <div className="px-4 py-2 bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-600 flex justify-between">
@@ -316,7 +333,7 @@ function AccountSummary({
             </div>
             <table className="w-full text-sm">
               <tbody>
-                {rows.map((r) => (
+                {allRows.map((r) => (
                   <tr key={r.id} className="border-t hover:bg-slate-50">
                     <td className="px-4 py-2 font-mono text-slate-500 w-20">{r.code}</td>
                     <td className="px-4 py-2 font-medium text-slate-900">{r.name}</td>
@@ -526,14 +543,25 @@ function Section({
 /* REPORT 4: Balance Sheet                                                     */
 /* -------------------------------------------------------------------------- */
 function BalanceSheet({
-  accounts, lines, entryDateMap, asOf, sym,
+  accounts, lines, entryDateMap, bankOpenings, asOf, sym,
 }: {
   accounts: Account[]; lines: JournalLine[];
   entryDateMap: Map<string, string>;
+  bankOpenings: BankOpening[];
   asOf: string; sym: string;
 }) {
   const cumulative = filterLinesAsOf(lines, entryDateMap, asOf);
   const totals = netByAccount(cumulative);
+
+  // Bank opening balances aren't journaled — fold each into its linked asset
+  // account (debit-positive) so cash matches the Dashboard / payment screens,
+  // and carry the total as an offsetting "Opening Balance Equity" line so the
+  // sheet still balances.
+  const openingByAccount = new Map<string, number>();
+  for (const b of bankOpenings) {
+    openingByAccount.set(b.account_id, (openingByAccount.get(b.account_id) || 0) + Number(b.opening_balance));
+  }
+  const openingEquityTotal = bankOpenings.reduce((s, b) => s + Number(b.opening_balance), 0);
 
   function rowsFor(type: Account["type"]) {
     return accounts
@@ -542,7 +570,8 @@ function BalanceSheet({
         const t = totals.get(a.id) || { debit: 0, credit: 0 };
         const net = t.debit - t.credit;
         const isCredit = type === "liability" || type === "equity" || type === "income";
-        return { ...a, balance: isCredit ? -net : net };
+        const opening = type === "asset" ? (openingByAccount.get(a.id) || 0) : 0;
+        return { ...a, balance: (isCredit ? -net : net) + opening };
       })
       .filter((r) => Math.abs(r.balance) > 0.001);
   }
@@ -551,16 +580,16 @@ function BalanceSheet({
   const liabilities = rowsFor("liability");
   const equity = rowsFor("equity");
 
-  // Retained Earnings = cumulative (Income - Expense) up to asOf
+  // Current-period earnings = cumulative (Income - Expense) up to asOf
   const incomeRows = rowsFor("income");
   const expenseRows = rowsFor("expense");
   const incomeTotal = incomeRows.reduce((s, r) => s + r.balance, 0);
   const expenseTotal = expenseRows.reduce((s, r) => s + r.balance, 0);
-  const retainedEarnings = incomeTotal - expenseTotal;
+  const currentEarnings = incomeTotal - expenseTotal;
 
   const totalAssets = assets.reduce((s, r) => s + r.balance, 0);
   const totalLiabilities = liabilities.reduce((s, r) => s + r.balance, 0);
-  const totalEquity = equity.reduce((s, r) => s + r.balance, 0) + retainedEarnings;
+  const totalEquity = equity.reduce((s, r) => s + r.balance, 0) + currentEarnings + openingEquityTotal;
   const totalLiabAndEquity = totalLiabilities + totalEquity;
   const balanced = Math.abs(totalAssets - totalLiabAndEquity) < 0.01;
 
@@ -626,10 +655,16 @@ function BalanceSheet({
                 <span className="tabular-nums font-medium">{formatMoney(r.balance, sym)}</span>
               </div>
             ))}
+            {Math.abs(openingEquityTotal) > 0.001 && (
+              <div className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
+                <span className="italic text-slate-700">Opening Balance Equity (bank)</span>
+                <span className="tabular-nums font-medium">{formatMoney(openingEquityTotal, sym)}</span>
+              </div>
+            )}
             <div className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
-              <span className="italic text-slate-700">Retained Earnings (Income − Expenses to date)</span>
-              <span className={cn("tabular-nums font-medium", retainedEarnings < 0 && "text-red-700")}>
-                {formatMoney(retainedEarnings, sym)}
+              <span className="italic text-slate-700">Current Earnings (Income − Expenses to date)</span>
+              <span className={cn("tabular-nums font-medium", currentEarnings < 0 && "text-red-700")}>
+                {formatMoney(currentEarnings, sym)}
               </span>
             </div>
           </div>

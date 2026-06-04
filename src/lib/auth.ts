@@ -13,6 +13,7 @@ import {
   type Module,
   type PermissionMatrix,
 } from "@/lib/permissions";
+import { getActiveTenantStatus } from "@/lib/tenant-guard";
 import type { Profile, Role } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,17 @@ async function ensureProfile(
  * `{ok:false, error}` toast on the client.
  */
 export async function requirePermission(module: Module, action: Action) {
+  // Platform-enforced lifecycle: block ALL mutations unless the tenant is active.
+  const ts = await getActiveTenantStatus();
+  if (ts.status !== "active") {
+    const msg =
+      ts.status === "read_only"
+        ? "This workspace is in read-only mode — changes are disabled by the administrator."
+        : ts.status === "suspended"
+        ? "This workspace is suspended. Contact the administrator to restore access."
+        : "This workspace is locked. Contact the administrator to restore access.";
+    throw new Error(msg);
+  }
   const { permissions } = await getCurrentSession();
   if (!can(permissions, module, action)) {
     throw new Error(

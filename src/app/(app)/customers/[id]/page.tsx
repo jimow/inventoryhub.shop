@@ -16,7 +16,7 @@ type SP = Promise<{ from?: string; to?: string; type?: string }>;
 
 type Row = {
   ts: string;
-  kind: "sale" | "receipt" | "deposit";
+  kind: "sale" | "receipt" | "deposit" | "opening";
   doc: string;
   detail: string;
   amount: number;
@@ -45,7 +45,20 @@ export default async function CustomerDetail({
     supabase.from("payments").select("*").eq("customer_id", id).eq("direction", "in").order("date", { ascending: false }),
   ]);
 
+  const opening = Number(c.opening_balance || 0);
+  const openingDate = (c.opening_date || c.created_at || "").slice(0, 10);
+
   const rows: Row[] = [];
+  if (opening > 0) {
+    rows.push({
+      ts: openingDate,
+      kind: "opening",
+      doc: "Opening",
+      detail: "Opening balance brought forward (A/R)",
+      amount: opening,
+      status: "opening",
+    });
+  }
   for (const s of (sales || []) as Sale[]) {
     if (s.status === "cancelled") continue;
     rows.push({
@@ -80,9 +93,12 @@ export default async function CustomerDetail({
 
   const totalSales    = (sales || []).filter((s) => s.status !== "cancelled").reduce((sum, s) => sum + Number(s.total), 0);
   const totalReceived = (payments || []).reduce((sum, p) => sum + Number(p.amount), 0);
-  const outstanding   = (sales || [])
-    .filter((s) => s.status === "confirmed")
+  // A/R balance = opening brought forward + everything still unpaid on non-
+  // cancelled invoices. Computed live so it always reflects the opening.
+  const salesOutstanding = (sales || [])
+    .filter((s) => s.status !== "cancelled")
     .reduce((sum, s) => sum + Math.max(0, Number(s.total) - Number(s.amount_paid || 0)), 0);
+  const outstanding = opening + salesOutstanding;
   const overdueCount  = (sales || []).filter((s) => {
     if (!s.due_date || s.status === "paid" || s.status === "cancelled") return false;
     return new Date(s.due_date) < new Date();
@@ -107,10 +123,11 @@ export default async function CustomerDetail({
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
         <Stat label="Total invoiced"  value={formatMoney(totalSales)}    icon={ReceiptIcon} color="bg-blue-500" />
         <Stat label="Total received"  value={formatMoney(totalReceived)} icon={Wallet}      color="bg-emerald-500" />
-        <Stat label="Outstanding"     value={formatMoney(outstanding)}   icon={PiggyBank}   color={outstanding > 0 ? "bg-amber-500" : "bg-slate-400"} />
+        <Stat label="Opening balance" value={formatMoney(opening)}       icon={PiggyBank}   color={opening > 0 ? "bg-violet-500" : "bg-slate-400"} />
+        <Stat label="Balance (A/R)"   value={formatMoney(outstanding)}   icon={PiggyBank}   color={outstanding > 0 ? "bg-amber-500" : "bg-slate-400"} />
         <Stat label="Overdue invoices" value={String(overdueCount)}      icon={AlertTriangle} color={overdueCount > 0 ? "bg-red-500" : "bg-slate-400"} />
       </div>
 
@@ -168,16 +185,18 @@ export default async function CustomerDetail({
                   <td className="p-3">
                     {r.kind === "sale"
                       ? <Badge variant="info">Sale</Badge>
-                      : r.kind === "deposit"
-                        ? <Badge variant="success">Deposit</Badge>
-                        : <Badge variant="success">Receipt</Badge>}
+                      : r.kind === "opening"
+                        ? <Badge variant="warning">Opening</Badge>
+                        : r.kind === "deposit"
+                          ? <Badge variant="success">Deposit</Badge>
+                          : <Badge variant="success">Receipt</Badge>}
                   </td>
                   <td className="p-3 font-mono">
                     {r.url ? <Link href={r.url} className="text-blue-600 hover:underline">{r.doc}</Link> : r.doc}
                   </td>
                   <td className="p-3 text-slate-600">{r.detail}</td>
-                  <td className={`p-3 text-right font-semibold ${r.kind === "sale" ? "text-blue-700" : "text-emerald-700"}`}>
-                    {r.kind === "sale" ? "" : "+"}{formatMoney(r.amount)}
+                  <td className={`p-3 text-right font-semibold ${r.kind === "sale" || r.kind === "opening" ? "text-blue-700" : "text-emerald-700"}`}>
+                    {r.kind === "sale" || r.kind === "opening" ? "" : "+"}{formatMoney(r.amount)}
                   </td>
                   <td className="p-3">{r.status ? <Badge variant="secondary">{r.status}</Badge> : "-"}</td>
                 </tr>

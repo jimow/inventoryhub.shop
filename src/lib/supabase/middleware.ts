@@ -33,7 +33,13 @@ export async function updateSession(request: NextRequest) {
 
   const url = request.nextUrl.clone();
   // /install is public (no shop/users exist yet at first run); /login too.
-  const isPublicRoute = url.pathname.startsWith("/login") || url.pathname.startsWith("/install");
+  // /platform is the cross-tenant super-admin console — it runs its own auth
+  // (Supabase session + platform_admins membership), so the tenant-app auth
+  // redirect must not interfere with it.
+  const isPublicRoute =
+    url.pathname.startsWith("/login") ||
+    url.pathname.startsWith("/install") ||
+    url.pathname.startsWith("/platform");
   const isAuthRoute = url.pathname.startsWith("/login");
 
   if (!user && !isPublicRoute) {

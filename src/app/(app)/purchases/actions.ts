@@ -7,7 +7,7 @@ import { reserveNextNumber, getSettings } from "@/lib/numbering";
 import { objectsToCsv } from "@/lib/csv";
 import { postPurchaseJournal, postPaymentJournal, recomputePurchaseStatus, reverseJournalsForSource, availableFunds } from "@/lib/accounting";
 import { computeLineTotals } from "@/lib/utils";
-import type { PurchaseLine, PurchaseType } from "@/lib/types";
+import type { Purchase, PurchaseLine, PurchaseType } from "@/lib/types";
 
 type Result = { ok: boolean; error?: string };
 
@@ -22,17 +22,27 @@ function readForm(formData: FormData, inclusive: boolean) {
   const { subtotal, tax, total } = computeLineTotals(items, discount, tax_rate, inclusive);
   const purchase_type = (String(formData.get("purchase_type") || "cash") as PurchaseType);
   const due_date = String(formData.get("due_date") || "") || null;
+
+  // Landed charges — capitalized into inventory cost on receive. They raise the
+  // amount owed (added to total / A/P) but are NOT taxed here.
+  const transport_cost = Math.max(0, Number(formData.get("transport_cost") || 0) || 0);
+  const other_charges = Math.max(0, Number(formData.get("other_charges") || 0) || 0);
+  const lineCharges = items.reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
+  const grandTotal = Math.round((total + transport_cost + other_charges + lineCharges) * 100) / 100;
+
   return {
     po_no: String(formData.get("po_no") || "").trim(),
     date: String(formData.get("date") || new Date().toISOString().slice(0, 10)),
     supplier_id: String(formData.get("supplier_id") || "") || null,
-    items, subtotal, discount, tax_rate, tax, total, purchase_type,
+    items, subtotal, discount, tax_rate, tax,
+    transport_cost, other_charges,
+    total: grandTotal, purchase_type,
     due_date: purchase_type === "credit" ? due_date : null,
     notes: String(formData.get("notes") || "") || null,
   };
 }
 
-export async function createPurchase(formData: FormData): Promise<Result> {
+export async function createPurchase(formData: FormData): Promise<Result & { purchase?: Purchase }> {
   try {
     await requirePermission("purchases", "create");
     const cfg = await getSettings();
@@ -41,9 +51,58 @@ export async function createPurchase(formData: FormData): Promise<Result> {
     if (!payload.supplier_id) return { ok: false, error: "Supplier required" };
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
     const supabase = await createClient();
-    const { error } = await supabase.from("purchases").insert({ ...payload, status: "draft", amount_paid: 0 });
-    if (error) return { ok: false, error: error.message };
+    const { data: created, error } = await supabase
+      .from("purchases")
+      .insert({ ...payload, status: "draft", amount_paid: 0 })
+      .select("*")
+      .single();
+    if (error || !created) return { ok: false, error: error?.message || "Failed to create purchase" };
     revalidatePath("/purchases");
+    return { ok: true, purchase: created as Purchase };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
+/**
+ * Cash purchase in a single step: create + receive (with serials) + pay the
+ * supplier — no draft/ordered/received process. Any shortfall vs. the total is
+ * kept as a balance owed (A/P). Serials must equal each serial item's quantity.
+ */
+export async function createCashPurchase(
+  formData: FormData,
+  serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
+  paidAmount?: number,
+  payment_method_id?: string | null,
+): Promise<Result> {
+  try {
+    await requirePermission("purchases", "create");
+    const cfg = await getSettings();
+    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    payload.purchase_type = "cash"; // force cash
+    payload.due_date = null;
+    if (!payload.po_no) payload.po_no = await reserveNextNumber("nextPO", cfg.numbering?.poPrefix || "PO-");
+    if (!payload.supplier_id) return { ok: false, error: "Supplier required" };
+    if (!payload.items.length) return { ok: false, error: "Add at least one line" };
+
+    const supabase = await createClient();
+    // Insert as "ordered" so the receive core can run, then process immediately.
+    const { data: created, error } = await supabase
+      .from("purchases")
+      .insert({ ...payload, status: "ordered", amount_paid: 0 })
+      .select("id")
+      .single();
+    if (error || !created) return { ok: false, error: error?.message || "Failed to create purchase" };
+
+    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, paidAmount, payment_method_id);
+    if (!r.ok) {
+      // Validation failed before any stock moved — drop the orphan so the user
+      // isn't left with a stranded "ordered" PO.
+      await supabase.from("purchases").delete().eq("id", created.id);
+      return r;
+    }
+    revalidatePath("/purchases");
+    revalidatePath("/payments");
+    revalidatePath("/products");
+    revalidatePath("/dashboard");
     return { ok: true };
   } catch (e) { return { ok: false, error: (e as Error).message }; }
 }
@@ -93,6 +152,18 @@ export async function receivePurchase(
 ): Promise<Result> {
   try {
     await requirePermission("purchases", "edit");
+    return await receiveOrderedPurchase(id, serialsByLine, paidAmount, payment_method_id);
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
+/** Core receive + (cash) pay. No permission check — callers must authorize. */
+async function receiveOrderedPurchase(
+  id: string,
+  serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
+  paidAmount?: number,
+  payment_method_id?: string | null,
+): Promise<Result> {
+  try {
     const supabase = await createClient();
     const admin = createServiceClient();
     const { data: po } = await supabase.from("purchases").select("*").eq("id", id).single();
@@ -103,10 +174,28 @@ export async function receivePurchase(
     const refIds = Array.from(new Set(lines.map((l) => l.refId)));
     const { data: prods } = await admin
       .from("products")
-      .select("id, name, serial_tracked, current_stock")
+      .select("id, name, serial_tracked, current_stock, cost_price")
       .in("id", refIds);
-    type Prod = { id: string; name: string; serial_tracked: boolean; current_stock: number };
+    type Prod = { id: string; name: string; serial_tracked: boolean; current_stock: number; cost_price: number };
     const prodMap = new Map<string, Prod>((prods || []).map((p) => [p.id, p as Prod]));
+
+    // LANDED COST: spread the purchase's net cost (goods − discount + transport +
+    // other + per-line charges = total − tax = the Inventory journal debit)
+    // across the lines so each unit's stored cost reflects what it truly cost to
+    // get it on the shelf. Allocation is by line value, plus any per-item charge
+    // assigned directly to that line. The sum equals the Inventory debit exactly.
+    const lineValue = (l: PurchaseLine) => Number(l.price) * Number(l.qty);
+    const totalGoods = lines.reduce((s, l) => s + lineValue(l), 0);
+    const totalSpecific = lines.reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
+    const invDebit = Math.round((Number(po.total) - Number(po.tax || 0)) * 100) / 100;
+    const remainder = invDebit - totalSpecific;
+    const landedUnitCost = lines.map((l) => {
+      const qty = Number(l.qty) || 0;
+      if (qty <= 0) return 0;
+      const alloc = totalGoods > 0 ? remainder * (lineValue(l) / totalGoods) : remainder / lines.length;
+      const landed = alloc + Math.max(0, Number(l.charge || 0) || 0);
+      return landed / qty;
+    });
 
     // Validate every serial-tracked line has the right number of serials.
     for (let i = 0; i < lines.length; i++) {
@@ -127,8 +216,17 @@ export async function receivePurchase(
       const l = lines[i];
       const p = prodMap.get(l.refId);
       if (!p) continue;
+      const qty = Number(l.qty) || 0;
+      const landed = Math.round((landedUnitCost[i] || 0) * 10000) / 10000;
+      // Moving-average cost: blend the landed unit cost into the existing stock.
+      const oldStock = Number(p.current_stock) || 0;
+      const oldCost = Number(p.cost_price) || 0;
+      const newStock = oldStock + qty;
+      const newCost = newStock > 0
+        ? Math.round(((oldStock * oldCost + landed * qty) / newStock) * 10000) / 10000
+        : landed;
       await admin.from("products")
-        .update({ current_stock: Number(p.current_stock) + Number(l.qty) })
+        .update({ current_stock: newStock, cost_price: newCost })
         .eq("id", l.refId);
 
       if (p.serial_tracked) {
@@ -138,7 +236,7 @@ export async function receivePurchase(
           serial_no:         s.serial.trim(),
           barcode:           s.barcode?.trim() || null,
           status:            "in_stock",
-          cost:              Number(l.price) || 0,
+          cost:              landed, // landed cost per unit, not bare line price
           purchase_id:       po.id,
           purchase_line_idx: i,
         }));

@@ -1,10 +1,10 @@
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createServiceClient, currentTenantId } from "@/lib/supabase/server";
 import { getCurrentSession, requireViewPermission } from "@/lib/auth";
 import { getSettings } from "@/lib/numbering";
 import { getCachedCustomersList, getCachedActiveProductsList, getCachedPaymentMethods } from "@/lib/cached-lookups";
 import { SalesClient } from "./sales-client";
 import { parseListParams, listRange, type ListSearchParams } from "@/lib/list-params";
-import type { Sale, Customer, Product, PaymentMethod } from "@/lib/types";
+import type { Sale, Customer, Product, PaymentMethod, ReturnLine, SalesReturn } from "@/lib/types";
 
 export default async function SalesPage({
   searchParams,
@@ -39,13 +39,42 @@ export default async function SalesPage({
     getSettings(),
   ]);
 
+  // Mark which of these sales have returns (full vs partial), so the list can
+  // show a "Returned" badge. Read via service client (scoped to tenant) so the
+  // badge shows even for users without the returns permission.
+  const saleRows = (sales as Sale[]) || [];
+  const returnsBySale: Record<string, "full" | "partial"> = {};
+  const returnsListBySale: Record<string, SalesReturn[]> = {};
+  if (saleRows.length) {
+    const admin = createServiceClient();
+    const tid = currentTenantId();
+    let rq = admin.from("sales_returns").select("*").eq("status", "posted")
+      .in("sale_id", saleRows.map((s) => s.id)).order("created_at", { ascending: false });
+    if (tid) rq = rq.eq("tenant_id", tid);
+    const { data: rets } = await rq;
+    const returnedQty = new Map<string, number>();
+    for (const r of (rets as SalesReturn[]) || []) {
+      const q = ((r.items as ReturnLine[]) || []).reduce((s, l) => s + Number(l.qty), 0);
+      returnedQty.set(r.sale_id as string, (returnedQty.get(r.sale_id as string) || 0) + q);
+      (returnsListBySale[r.sale_id as string] ||= []).push(r);
+    }
+    for (const s of saleRows) {
+      const ret = returnedQty.get(s.id) || 0;
+      if (ret <= 0) continue;
+      const sold = ((s.items as ReturnLine[]) || []).reduce((sum, l) => sum + Number(l.qty), 0);
+      returnsBySale[s.id] = ret >= sold - 0.001 ? "full" : "partial";
+    }
+  }
+
   return (
     <SalesClient
-      sales={(sales as Sale[]) || []}
+      sales={saleRows}
       totalCount={count || 0}
       customers={customers as Customer[]}
       products={products as Product[]}
       methods={methods as PaymentMethod[]}
+      returnsBySale={returnsBySale}
+      returnsListBySale={returnsListBySale}
       settings={settings}
       permissions={permissions}
     />

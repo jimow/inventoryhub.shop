@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Pencil, Plus, Trash2, CheckCircle2, XCircle, Upload } from "lucide-react";
+import { Pencil, Plus, Trash2, CheckCircle2, XCircle, Upload, Eye, ShoppingCart } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,9 @@ export function SuppliersClient({
     { key: "city", label: "City", className: "w-[130px]" },
     { key: "payment_terms", label: "Terms", className: "w-[110px]" },
     ...(canSeeBalance ? [{
+      key: "opening_balance", label: "Opening", className: "w-[110px] text-right tabular-nums text-slate-500",
+      render: (r: Supplier) => Number(r.opening_balance || 0) !== 0 ? formatMoney(Number(r.opening_balance), sym) : <span className="text-slate-300">—</span>,
+    }, {
       key: "balance", label: "Balance", className: "w-[120px] text-right tabular-nums font-semibold",
       render: (r: Supplier) => (
         <span className={Number(r.balance) > 0 ? "text-amber-700" : Number(r.balance) < 0 ? "text-emerald-700" : "text-slate-500"}>
@@ -108,8 +111,16 @@ export function SuppliersClient({
         bulkActions={bulkActions}
         rowActions={(row) => (
           <>
+            <Button asChild variant="ghost" size="icon" title="View statement" className="h-8 w-8">
+              <Link href={`/suppliers/${row.id}`}><Eye className="h-4 w-4" /></Link>
+            </Button>
+            {can(permissions, "purchases", "create") && (
+              <Button asChild variant="ghost" size="icon" title="New purchase" className="h-8 w-8 text-amber-600">
+                <Link href={`/purchases?new=1&supplier_id=${row.id}`}><ShoppingCart className="h-4 w-4" /></Link>
+              </Button>
+            )}
             {can(permissions, "suppliers", "edit") && (
-              <Button variant="ghost" size="icon" onClick={() => setEditing(row)} title="Edit">
+              <Button variant="ghost" size="icon" onClick={() => setEditing(row)} title="Edit" className="h-8 w-8">
                 <Pencil className="h-4 w-4" />
               </Button>
             )}
@@ -178,6 +189,16 @@ function SupplierDialog({ supplier, settings, onClose }: { supplier: Supplier | 
               {(settings.paymentTerms || []).map((t) => <option key={t} value={t}>{t}</option>)}
             </Select>
           </div>
+          {!supplier && (
+            <>
+              <div className="col-span-6"><Label htmlFor="opening_balance">Opening balance (we owe)</Label>
+                <Input id="opening_balance" name="opening_balance" type="number" step="0.01" min="0" defaultValue={0} />
+                <p className="text-[11px] text-muted-foreground mt-0.5">Posts Dr Opening Balance Equity · Cr A/P.</p>
+              </div>
+              <div className="col-span-6"><Label htmlFor="opening_date">As of date</Label>
+                <Input id="opening_date" name="opening_date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></div>
+            </>
+          )}
           <div className="col-span-6"><Label htmlFor="status">Status</Label>
             <Select id="status" name="status" defaultValue={supplier?.status || "active"}>
               <option value="active">Active</option>

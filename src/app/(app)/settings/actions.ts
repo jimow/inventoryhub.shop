@@ -103,7 +103,26 @@ export async function saveCurrencyTax(formData: FormData): Promise<Result> {
       inclusive:      bool(formData, "taxInclusive"),
       registrationNo: str(formData, "taxRegistrationNo"),
     },
+    dividend: {
+      rate:      num(formData, "dividendRate", 0),
+      frequency: (str(formData, "dividendFrequency", "yearly") as NonNullable<SettingsData["dividend"]>["frequency"]),
+    },
+    equity: {
+      ownershipMode: (str(formData, "ownershipMode", "contribution") as NonNullable<SettingsData["equity"]>["ownershipMode"]),
+    },
   });
+}
+
+export async function saveApprovals(formData: FormData): Promise<Result> {
+  await requirePermission("settings", "edit");
+  const cur = await readCurrent();
+  // Comma / newline separated amounts → ascending unique positive thresholds.
+  const tiers = String(formData.get("approvalTiers") || "")
+    .split(/[\n,]+/)
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  return write({ ...cur, approvals: { tiers } });
 }
 
 export async function savePos(formData: FormData): Promise<Result> {
@@ -162,11 +181,12 @@ export async function saveSalesDefaults(formData: FormData): Promise<Result> {
   return write({
     ...cur,
     sales: {
-      defaultType:       (str(formData, "defaultType", "cash") as "cash" | "credit" | "invoice"),
-      defaultCreditDays: num(formData, "defaultCreditDays", 30),
-      confirmCancel:     bool(formData, "confirmCancel"),
-      allowBackdate:     bool(formData, "allowBackdate"),
-      maxBackdateDays:   num(formData, "maxBackdateDays", 7),
+      defaultType:        (str(formData, "defaultType", "cash") as "cash" | "credit" | "invoice"),
+      defaultCreditDays:  num(formData, "defaultCreditDays", 30),
+      confirmCancel:      bool(formData, "confirmCancel"),
+      allowBackdate:      bool(formData, "allowBackdate"),
+      maxBackdateDays:    num(formData, "maxBackdateDays", 7),
+      showCustomerCredit: bool(formData, "showCustomerCredit"),
     },
   });
 }

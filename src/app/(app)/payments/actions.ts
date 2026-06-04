@@ -2,12 +2,95 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
-import { requirePermission } from "@/lib/auth";
-import { reserveNextNumber } from "@/lib/numbering";
+import { requirePermission, getCurrentSession } from "@/lib/auth";
+import { reserveNextNumber, getSettings } from "@/lib/numbering";
 import { postPaymentJournal, postJournal, recomputeSaleStatus, recomputePurchaseStatus, reverseJournalsForSource, assertSufficientFunds } from "@/lib/accounting";
 import type { PaymentDirection, PaymentSource } from "@/lib/types";
 
 type Result = { ok: boolean; error?: string };
+type LineInput = { account_code: string; debit?: number; credit?: number; description?: string };
+
+/** Number of approval levels a money-out amount needs (count of tiers met). */
+async function approvalLevelsFor(amount: number): Promise<number> {
+  const cfg = await getSettings();
+  const tiers = (cfg.approvals?.tiers || []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  return tiers.filter((t) => amount >= t - 0.01).length;
+}
+
+/**
+ * For an already-inserted money-out payment row, either post its journal now
+ * (fund-checked) or hold it for approval if the amount needs sign-off.
+ */
+async function postOrQueueOut(
+  admin: ReturnType<typeof createServiceClient>,
+  payment: { id: string; date: string; amount: number; payment_method_id: string | null },
+  lines: LineInput[],
+  desc: string,
+  fundAmount?: number,
+): Promise<Result> {
+  // Cash actually leaving = amount + any fee (the lines already encode the fee).
+  const checkAmount = fundAmount ?? payment.amount;
+  const levels = await approvalLevelsFor(payment.amount);
+  if (levels <= 0) {
+    const funds = await assertSufficientFunds(payment.payment_method_id, checkAmount);
+    if (!funds.ok) { await admin.from("payments").delete().eq("id", payment.id); return { ok: false, error: funds.error }; }
+    const j = await postJournal({ date: payment.date, description: desc, source_type: "payment", source_id: payment.id, lines });
+    if (!j.ok) { await admin.from("payments").delete().eq("id", payment.id); return { ok: false, error: j.error }; }
+    return { ok: true };
+  }
+  // Hold for approval — store the journal to post once signed off.
+  await admin.from("payments").update({
+    approval_status: "pending", required_levels: levels, pending_lines: lines, pending_desc: desc,
+  }).eq("id", payment.id);
+  return { ok: true };
+}
+
+/* -------------------------------------------------------------------------- */
+/* APPROVAL ACTIONS                                                            */
+/* -------------------------------------------------------------------------- */
+export async function approvePayment(id: string): Promise<Result> {
+  try {
+    await requirePermission("payments", "approve");
+    const admin = createServiceClient();
+    const { userId, profile } = await getCurrentSession();
+    const { data: p } = await admin.from("payments").select("*").eq("id", id).single();
+    if (!p) return { ok: false, error: "Payment not found" };
+    if (p.approval_status !== "pending") return { ok: false, error: "Not pending approval" };
+
+    const approvals: { user_id: string; name: string; at: string }[] = Array.isArray(p.approvals) ? p.approvals : [];
+    if (approvals.some((a) => a.user_id === userId)) return { ok: false, error: "You have already approved this payment" };
+    approvals.push({ user_id: userId, name: profile.full_name || profile.username || profile.email || "user", at: new Date().toISOString() });
+
+    if (approvals.length >= Number(p.required_levels || 1)) {
+      // Fully approved → post the held journal now (fund-checked, incl. any fee).
+      const funds = await assertSufficientFunds(p.payment_method_id, Number(p.amount) + Number(p.fee || 0));
+      if (!funds.ok) return { ok: false, error: funds.error };
+      const j = await postJournal({
+        date: p.date, description: p.pending_desc || `Payment ${p.payment_no}`,
+        source_type: "payment", source_id: p.id, lines: p.pending_lines || [],
+      });
+      if (!j.ok) return { ok: false, error: `Journal failed: ${j.error}` };
+      await admin.from("payments").update({ approval_status: "approved", approvals, pending_lines: null }).eq("id", id);
+    } else {
+      await admin.from("payments").update({ approvals }).eq("id", id);
+    }
+    revalidatePath("/payments");
+    return { ok: true };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
+export async function rejectPayment(id: string): Promise<Result> {
+  try {
+    await requirePermission("payments", "approve");
+    const admin = createServiceClient();
+    const { data: p } = await admin.from("payments").select("approval_status").eq("id", id).single();
+    if (!p) return { ok: false, error: "Payment not found" };
+    if (p.approval_status !== "pending") return { ok: false, error: "Not pending approval" };
+    await admin.from("payments").update({ approval_status: "rejected", pending_lines: null }).eq("id", id);
+    revalidatePath("/payments");
+    return { ok: true };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
 
 export async function recordPayment(input: {
   direction: PaymentDirection;
@@ -18,6 +101,7 @@ export async function recordPayment(input: {
   supplier_id?: string | null;
   payment_method_id: string;
   amount: number;
+  fee?: number;
   reference?: string | null;
   date?: string;
   notes?: string | null;
@@ -26,14 +110,13 @@ export async function recordPayment(input: {
     await requirePermission("payments", "create");
     if (!input.amount || input.amount <= 0) return { ok: false, error: "Amount must be greater than 0" };
     if (!input.payment_method_id) return { ok: false, error: "Payment method is required" };
-
-    // Money out can't exceed what's available in the source account.
-    if (input.direction === "out") {
-      const funds = await assertSufficientFunds(input.payment_method_id, input.amount);
-      if (!funds.ok) return { ok: false, error: funds.error };
+    const fee = Math.max(0, Number(input.fee || 0) || 0);
+    if (input.direction === "in" && fee >= input.amount) {
+      return { ok: false, error: "Fee cannot be greater than or equal to the amount received." };
     }
 
     const supabase = await createClient();
+    const admin = createServiceClient();
     const payment_no = await reserveNextNumber("nextPayment", "PMT-");
     const payload = {
       payment_no,
@@ -46,14 +129,39 @@ export async function recordPayment(input: {
       supplier_id: input.supplier_id ?? null,
       payment_method_id: input.payment_method_id,
       amount: input.amount,
+      fee,
       reference: input.reference ?? null,
       notes: input.notes ?? null,
     };
     const { data: created, error } = await supabase.from("payments").insert(payload).select("*").single();
     if (error || !created) return { ok: false, error: error?.message || "Failed to record payment" };
 
-    // Auto-post journal & recompute source status
-    await postPaymentJournal(created);
+    const asset = await assetCodeForMethod(input.payment_method_id);
+    if (input.direction === "out") {
+      // Money out is fund-checked (incl. fee) & may be held for tiered approval.
+      const lines: LineInput[] = [
+        { account_code: "2000", debit: input.amount, description: `Payment ${payment_no}` },
+        ...(fee > 0 ? [{ account_code: "5200", debit: fee, description: `Charges on ${payment_no}` }] : []),
+        { account_code: asset,  credit: input.amount + fee, description: `Outflow for ${payment_no}` },
+      ];
+      const r = await postOrQueueOut(admin, created, lines, `Payment to supplier ${payment_no}`, input.amount + fee);
+      if (!r.ok) return r;
+    } else if (fee > 0) {
+      // Money in, net of a deducted fee: Dr asset (amount−fee) · Dr Charges · Cr A/R.
+      const j = await postJournal({
+        date: created.date, description: `Receipt ${payment_no}`, source_type: "payment", source_id: created.id,
+        lines: [
+          { account_code: asset,   debit: input.amount - fee, description: `Receipt ${payment_no}` },
+          { account_code: "5200",  debit: fee,                description: `Charges on ${payment_no}` },
+          { account_code: "1200",  credit: input.amount,      description: `Receipt for ${payment_no}` },
+        ],
+      });
+      if (!j.ok) return { ok: false, error: j.error };
+    } else {
+      await postPaymentJournal(created);
+    }
+    // recompute* ignores pending/rejected payments, so a held payment won't
+    // mark the sale/purchase paid until it's actually approved & posted.
     if (input.sale_id) await recomputeSaleStatus(input.sale_id);
     if (input.purchase_id) await recomputePurchaseStatus(input.purchase_id);
 
@@ -106,6 +214,7 @@ export async function recordCustomerDeposit(input: {
   customer_id: string;
   amount: number;
   payment_method_id: string;
+  fee?: number;
   reference?: string | null;
   date?: string;
   notes?: string | null;
@@ -115,6 +224,8 @@ export async function recordCustomerDeposit(input: {
     if (!input.amount || input.amount <= 0) return { ok: false, error: "Amount must be greater than 0" };
     if (!input.customer_id) return { ok: false, error: "Customer is required" };
     if (!input.payment_method_id) return { ok: false, error: "Payment method is required" };
+    const fee = Math.max(0, Number(input.fee || 0) || 0);
+    if (fee >= input.amount) return { ok: false, error: "Fee cannot be greater than or equal to the amount." };
 
     const supabase = await createClient();
     const admin = createServiceClient();
@@ -128,6 +239,7 @@ export async function recordCustomerDeposit(input: {
       customer_id: input.customer_id,
       payment_method_id: input.payment_method_id,
       amount: input.amount,
+      fee,
       reference: input.reference ?? null,
       notes: input.notes || `Customer deposit · ${cust?.name ?? ""}`.trim(),
     }).select("*").single();
@@ -140,7 +252,8 @@ export async function recordCustomerDeposit(input: {
       source_type: "payment",
       source_id: created.id,
       lines: [
-        { account_code: asset, debit: input.amount, description: `Deposit from ${cust?.name ?? "customer"}` },
+        { account_code: asset, debit: input.amount - fee, description: `Deposit from ${cust?.name ?? "customer"}` },
+        ...(fee > 0 ? [{ account_code: "5200", debit: fee, description: `Charges on ${payment_no}` }] : []),
         { account_code: "2200", credit: input.amount, description: `Advance from ${cust?.name ?? "customer"}` },
       ],
     });
@@ -163,6 +276,7 @@ export async function recordOtherIncome(input: {
   income_account_code?: string;
   payment_method_id: string;
   description: string;
+  fee?: number;
   reference?: string | null;
   date?: string;
 }): Promise<Result & { payment_no?: string }> {
@@ -171,6 +285,8 @@ export async function recordOtherIncome(input: {
     if (!input.amount || input.amount <= 0) return { ok: false, error: "Amount must be greater than 0" };
     if (!input.payment_method_id) return { ok: false, error: "Payment method is required" };
     if (!input.description.trim()) return { ok: false, error: "Describe what the income is for" };
+    const fee = Math.max(0, Number(input.fee || 0) || 0);
+    if (fee >= input.amount) return { ok: false, error: "Fee cannot be greater than or equal to the amount." };
 
     const supabase = await createClient();
     const payment_no = await reserveNextNumber("nextPayment", "PMT-");
@@ -182,6 +298,7 @@ export async function recordOtherIncome(input: {
       source_type: "other",
       payment_method_id: input.payment_method_id,
       amount: input.amount,
+      fee,
       reference: input.reference ?? null,
       notes: `Other income · ${input.description}`,
     }).select("*").single();
@@ -194,7 +311,8 @@ export async function recordOtherIncome(input: {
       source_type: "payment",
       source_id: created.id,
       lines: [
-        { account_code: asset,      debit:  input.amount, description: input.description },
+        { account_code: asset,      debit:  input.amount - fee, description: input.description },
+        ...(fee > 0 ? [{ account_code: "5200", debit: fee, description: `Charges on ${payment_no}` }] : []),
         { account_code: incomeCode, credit: input.amount, description: input.description },
       ],
     });
@@ -217,6 +335,7 @@ export async function recordExpense(input: {
   expense_account_code: string;
   payment_method_id: string;
   description: string;
+  fee?: number;
   reference?: string | null;
   supplier_id?: string | null;
   date?: string;
@@ -227,11 +346,10 @@ export async function recordExpense(input: {
     if (!input.payment_method_id) return { ok: false, error: "Payment method is required" };
     if (!input.expense_account_code) return { ok: false, error: "Expense account is required" };
     if (!input.description.trim()) return { ok: false, error: "Describe the expense" };
-
-    const funds = await assertSufficientFunds(input.payment_method_id, input.amount);
-    if (!funds.ok) return { ok: false, error: funds.error };
+    const fee = Math.max(0, Number(input.fee || 0) || 0);
 
     const supabase = await createClient();
+    const admin = createServiceClient();
     const payment_no = await reserveNextNumber("nextPayment", "PMT-");
     const { data: created, error } = await supabase.from("payments").insert({
       payment_no,
@@ -241,22 +359,20 @@ export async function recordExpense(input: {
       supplier_id: input.supplier_id ?? null,
       payment_method_id: input.payment_method_id,
       amount: input.amount,
+      fee,
       reference: input.reference ?? null,
       notes: `Expense · ${input.description}`,
     }).select("*").single();
     if (error || !created) return { ok: false, error: error?.message || "Failed" };
 
     const asset = await assetCodeForMethod(input.payment_method_id);
-    await postJournal({
-      date: created.date,
-      description: `Expense ${payment_no} - ${input.description}`,
-      source_type: "payment",
-      source_id: created.id,
-      lines: [
-        { account_code: input.expense_account_code, debit:  input.amount, description: input.description },
-        { account_code: asset,                       credit: input.amount, description: input.description },
-      ],
-    });
+    const lines: LineInput[] = [
+      { account_code: input.expense_account_code, debit:  input.amount, description: input.description },
+      ...(fee > 0 ? [{ account_code: "5200", debit: fee, description: `Charges on ${payment_no}` }] : []),
+      { account_code: asset,                       credit: input.amount + fee, description: input.description },
+    ];
+    const r = await postOrQueueOut(admin, created, lines, `Expense ${payment_no} - ${input.description}`, input.amount + fee);
+    if (!r.ok) return r;
 
     revalidatePath("/payments");
     return { ok: true, payment_no };
@@ -274,6 +390,7 @@ export async function recordExpense(input: {
 export async function recordOwnerDrawing(input: {
   amount: number;
   payment_method_id: string;
+  fee?: number;
   reference?: string | null;
   date?: string;
   debit_account_code?: string;  // 3100 owner drawings by default
@@ -283,11 +400,10 @@ export async function recordOwnerDrawing(input: {
     await requirePermission("payments", "create");
     if (!input.amount || input.amount <= 0) return { ok: false, error: "Amount must be greater than 0" };
     if (!input.payment_method_id) return { ok: false, error: "Payment method is required" };
-
-    const funds = await assertSufficientFunds(input.payment_method_id, input.amount);
-    if (!funds.ok) return { ok: false, error: funds.error };
+    const fee = Math.max(0, Number(input.fee || 0) || 0);
 
     const supabase = await createClient();
+    const admin = createServiceClient();
     const payment_no = await reserveNextNumber("nextPayment", "PMT-");
     const debitCode = input.debit_account_code || "3100";
     const desc = input.description || "Owner drawing";
@@ -298,22 +414,20 @@ export async function recordOwnerDrawing(input: {
       source_type: "other",
       payment_method_id: input.payment_method_id,
       amount: input.amount,
+      fee,
       reference: input.reference ?? null,
       notes: `${desc}`,
     }).select("*").single();
     if (error || !created) return { ok: false, error: error?.message || "Failed" };
 
     const asset = await assetCodeForMethod(input.payment_method_id);
-    await postJournal({
-      date: created.date,
-      description: `Payment ${payment_no} - ${desc}`,
-      source_type: "payment",
-      source_id: created.id,
-      lines: [
-        { account_code: debitCode, debit:  input.amount, description: desc },
-        { account_code: asset,     credit: input.amount, description: desc },
-      ],
-    });
+    const lines: LineInput[] = [
+      { account_code: debitCode, debit:  input.amount, description: desc },
+      ...(fee > 0 ? [{ account_code: "5200", debit: fee, description: `Charges on ${payment_no}` }] : []),
+      { account_code: asset,     credit: input.amount + fee, description: desc },
+    ];
+    const r = await postOrQueueOut(admin, created, lines, `Payment ${payment_no} - ${desc}`, input.amount + fee);
+    if (!r.ok) return r;
 
     revalidatePath("/payments");
     return { ok: true, payment_no };

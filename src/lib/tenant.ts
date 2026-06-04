@@ -8,6 +8,7 @@
 //      root. Used when TENANT_SCHEMA is left unset, so a freshly-copied folder
 //      can be set up from the browser with no env editing.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const CONFIG_FILE = path.join(process.cwd(), "tenant.config.local.json");
@@ -19,7 +20,41 @@ export type TenantConfig = {
   schema?: string;
   installed: boolean;
   companyName?: string;
+  /**
+   * The folder + machine this install was set up in. Used to detect a COPIED
+   * deployment: if you copy the whole folder to a new location, the config
+   * travels with it, but `boundPath`/`boundHost` won't match the new folder —
+   * so we treat the copy as fresh and route it to /install instead of silently
+   * serving the source shop's data.
+   */
+  boundPath?: string;
+  boundHost?: string;
 };
+
+/** This deployment's folder + host signature. */
+function hereSignature(): { boundPath: string; boundHost: string } {
+  return { boundPath: path.resolve(process.cwd()), boundHost: os.hostname() };
+}
+
+/** Compare two filesystem paths, case-insensitively on Windows. */
+function samePath(a: string, b: string): boolean {
+  const na = path.resolve(a);
+  const nb = path.resolve(b);
+  return process.platform === "win32" ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
+/**
+ * Does a saved config belong to THIS folder (vs. a copy)? Decision is by folder
+ * path only — reliable across machines and OSes. `boundHost` is recorded for
+ * diagnostics but never used to fail the check (os.hostname() forms vary and a
+ * false positive would wrongly hide a live shop behind /install).
+ */
+function isBoundHere(cfg: TenantConfig): boolean {
+  // Legacy configs written before location-binding have no boundPath — adopt
+  // them for whichever folder first runs them (see readConfig).
+  if (!cfg.boundPath) return true;
+  return samePath(cfg.boundPath, process.cwd());
+}
 
 // Only a POSITIVE (installed) result is cached. We must never cache "not
 // installed", or the /install page and app layout would keep using that stale
@@ -30,7 +65,27 @@ function readConfig(): TenantConfig | null {
   if (cache?.installed) return cache;
   try {
     const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as TenantConfig;
-    if (cfg?.installed) cache = cfg; // cache once truly installed
+    if (!cfg?.installed) return cfg;
+
+    // A config that was copied here from another folder is NOT this folder's
+    // install — behave as if there's no config so a fresh /install runs and a
+    // separate tenant gets provisioned (its own data).
+    if (!isBoundHere(cfg)) return null;
+
+    // Legacy config with no boundPath: stamp it to this folder so any future
+    // COPY of this folder is correctly detected as a different deployment.
+    if (!cfg.boundPath) {
+      try {
+        const stamped = { ...cfg, ...hereSignature() };
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(stamped, null, 2));
+        cache = stamped;
+        return stamped;
+      } catch {
+        // Read-only FS — can't stamp, but it's still this folder's install.
+      }
+    }
+
+    cache = cfg; // cache once truly installed & bound here
     return cfg;
   } catch {
     return null;
@@ -61,8 +116,11 @@ export function isInstalled(): boolean {
   return Boolean(readConfig()?.installed);
 }
 
-/** Persist the wizard's choice so the deployment is pinned to its schema. */
+/** Persist the wizard's choice so the deployment is pinned to its schema.
+ *  Records the folder + host so a later COPY of this folder is recognised as a
+ *  separate deployment and gets its own fresh /install. */
 export function saveTenantConfig(cfg: TenantConfig): void {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
-  cache = cfg;
+  const full = { ...cfg, ...hereSignature() };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(full, null, 2));
+  cache = full;
 }

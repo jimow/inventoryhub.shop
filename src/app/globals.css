@@ -4,26 +4,28 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 47.4% 11.2%;
+    /* Soft, cool page canvas so white cards lift off the background. */
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
+    --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 47.4% 11.2%;
-    --primary: 221 83% 53%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 222 84% 55%;
     --primary-foreground: 210 40% 98%;
     --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary-foreground: 222 47% 11%;
     --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted-foreground: 215 19% 43%;
     --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent-foreground: 222 47% 11%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221 83% 53%;
-    --radius: 0.5rem;
+    --success: 152 56% 38%;
+    --border: 214 32% 91%;
+    --input: 214 26% 86%;
+    --ring: 222 84% 55%;
+    --radius: 0.7rem;
   }
 }
 
@@ -32,7 +34,50 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Brand-tinted text selection. */
+  ::selection {
+    background-color: hsl(222 84% 55% / 0.16);
+  }
+
+  /* Slim, modern scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(214 18% 80%) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(214 18% 82%);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(214 16% 70%);
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  /* Layered, soft elevation for cards & panels. */
+  .shadow-card {
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.08);
+  }
+  .shadow-card-lg {
+    box-shadow: 0 4px 12px -2px rgba(16, 24, 40, 0.08), 0 2px 6px -2px rgba(16, 24, 40, 0.06);
+  }
+  /* Opt-in hover lift for clickable cards/tiles. */
+  .card-interactive {
+    @apply transition-all duration-200;
+  }
+  .card-interactive:hover {
+    box-shadow: 0 8px 24px -6px rgba(16, 24, 40, 0.12), 0 2px 8px -2px rgba(16, 24, 40, 0.08);
+    transform: translateY(-1px);
   }
 }

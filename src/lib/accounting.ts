@@ -5,7 +5,12 @@
 
 import { createServiceClient, currentTenantId } from "@/lib/supabase/server";
 import { reserveNextNumber } from "@/lib/numbering";
+import { logActivity } from "@/lib/audit";
 import type { Sale, Purchase, Payment } from "@/lib/types";
+
+const JOURNAL_MODULE: Record<string, string> = {
+  sale: "sales", purchase: "purchases", payment: "payments", manual: "accounting",
+};
 
 type LineInput = { account_code: string; debit?: number; credit?: number; description?: string };
 
@@ -24,12 +29,17 @@ export const STANDARD_ACCOUNTS: { code: string; name: string; type: AccountType 
   { code: "1110", name: "M-Pesa Wallet",         type: "asset" },
   { code: "1200", name: "Accounts Receivable",   type: "asset" },
   { code: "1300", name: "Inventory",             type: "asset" },
+  { code: "1400", name: "Loans Receivable",      type: "asset" },
   { code: "2000", name: "Accounts Payable",      type: "liability" },
   { code: "2100", name: "Tax Payable",           type: "liability" },
   { code: "2200", name: "Customer Advances",     type: "liability" },
+  { code: "2300", name: "Loans Payable",         type: "liability" },
+  { code: "2400", name: "Dividends Payable",     type: "liability" },
   { code: "3000", name: "Owner Equity",          type: "equity" },
   { code: "3100", name: "Retained Earnings",     type: "equity" },
+  { code: "3200", name: "Opening Balance Equity", type: "equity" },
   { code: "4000", name: "Sales Revenue",         type: "income" },
+  { code: "4050", name: "Sales Returns",         type: "income" },
   { code: "4100", name: "Other Income",          type: "income" },
   { code: "4200", name: "Interest Income",       type: "income" },
   { code: "5000", name: "Cost of Goods Sold",    type: "expense" },
@@ -42,6 +52,7 @@ export const STANDARD_ACCOUNTS: { code: string; name: string; type: AccountType 
   { code: "5500", name: "Other Operating Expense", type: "expense" },
   { code: "5600", name: "Tax Remitted",          type: "expense" },
   { code: "5700", name: "Inventory Adjustment",  type: "expense" },
+  { code: "5900", name: "Interest Expense",      type: "expense" },
 ];
 
 // Per-process guard: once the COA is confirmed present for this deployment's
@@ -108,6 +119,10 @@ export async function postJournal(opts: {
   source_type: "manual" | "sale" | "purchase" | "payment";
   source_id?: string | null;
   lines: LineInput[];
+  /** Skip the activity-log entry (e.g. for the COGS leg of a sale). */
+  silent?: boolean;
+  /** Override the activity-log module (defaults to the source_type mapping). */
+  logModule?: string;
 }): Promise<{ ok: boolean; error?: string; entry_id?: string }> {
   try {
     const admin = createServiceClient();
@@ -141,6 +156,17 @@ export async function postJournal(opts: {
     );
     const { error: linesErr } = await admin.from("journal_lines").insert(linesPayload);
     if (linesErr) return { ok: false, error: linesErr.message };
+
+    if (!opts.silent) {
+      await logActivity({
+        module: opts.logModule || JOURNAL_MODULE[opts.source_type] || "accounting",
+        action: "post",
+        summary: opts.description,
+        entityType: opts.source_type,
+        entityId: opts.source_id ?? null,
+        amount: Math.round(totalDebit * 100) / 100,
+      });
+    }
     return { ok: true, entry_id: entry.id };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -220,6 +246,7 @@ export async function postCogsJournal(
     description: `COGS for ${sale.invoice_no}`,
     source_type: "sale",
     source_id: sale.id,
+    silent: true, // the sale itself is already logged; don't double-log COGS
     lines: [
       { account_code: "5000", debit: totalCogs, description: `COGS ${sale.invoice_no}` },
       { account_code: "1300", credit: totalCogs, description: `Stock relieved for ${sale.invoice_no}` },
@@ -262,7 +289,7 @@ export async function postPurchaseJournal(purchase: Purchase) {
  * Resolve the asset account that a given payment-method's funds land in.
  * Cash drawer -> 1010 ; M-Pesa -> 1110 ; Bank -> bank_account.account_id (or 1100) ; Card -> 1100.
  */
-async function resolvePaymentMethodAccountCode(
+export async function resolvePaymentMethodAccountCode(
   admin: ReturnType<typeof createServiceClient>,
   payment_method_id: string | null
 ): Promise<string> {
@@ -327,6 +354,92 @@ export async function postPaymentJournal(payment: Payment) {
 }
 
 /**
+ * Opening balance for a customer (AR they owe us) or supplier (AP we owe them),
+ * recorded when you first enter them so the books are correct from day one.
+ *   Customer: Dr Accounts Receivable (1200) / Cr Opening Balance Equity (3200)
+ *   Supplier: Dr Opening Balance Equity (3200) / Cr Accounts Payable (2000)
+ *
+ * `equityCode` lets callers send the credit/debit to Owner Equity (3000) or a
+ * specific account instead of the default Opening Balance Equity (3200) — used
+ * when the opening balance is attributed to a shareholder's capital.
+ */
+export async function postOpeningBalanceJournal(opts: {
+  party: "customer" | "supplier";
+  partyId: string;
+  name: string;
+  amount: number;
+  date: string;
+  equityCode?: string;
+}): Promise<{ ok: boolean; error?: string; entry_id?: string }> {
+  const amount = Math.round(Number(opts.amount) * 100) / 100;
+  if (!(amount > 0)) return { ok: true };
+  const equity = opts.equityCode || "3200";
+  const lines: LineInput[] =
+    opts.party === "customer"
+      ? [
+          { account_code: "1200",  debit: amount,  description: `Opening balance — ${opts.name}` },
+          { account_code: equity,  credit: amount, description: `Opening balance — ${opts.name}` },
+        ]
+      : [
+          { account_code: equity,  debit: amount,  description: `Opening balance — ${opts.name}` },
+          { account_code: "2000",  credit: amount, description: `Opening balance — ${opts.name}` },
+        ];
+  return postJournal({
+    date: opts.date,
+    description: `Opening balance (${opts.party}) — ${opts.name}`,
+    source_type: "manual",
+    source_id: opts.partyId,
+    lines,
+  });
+}
+
+/**
+ * Sales return journal. Reverses revenue + COGS for the returned goods.
+ *   Dr Sales Returns (4050)   [net]        — contra-revenue
+ *   Dr Tax Payable (2100)     [tax]        — reverse output tax
+ *      Cr <refund target>     [total]      — Cash (1010) if refunded, else A/R (1200)
+ *   Dr Inventory (1300)       [cost]       — goods back on the shelf
+ *      Cr COGS (5000)         [cost]
+ */
+export async function postSalesReturnJournal(opts: {
+  date: string; return_no: string; source_id: string;
+  net: number; tax: number; total: number; cost: number;
+  refund: "cash" | "credit"; cashCode?: string;
+}): Promise<{ ok: boolean; error?: string; entry_id?: string }> {
+  const refundCode = opts.refund === "cash" ? (opts.cashCode || "1010") : "1200";
+  const lines: LineInput[] = [
+    { account_code: "4050", debit: opts.net, description: `Sales return ${opts.return_no}` },
+  ];
+  if (opts.tax > 0) lines.push({ account_code: "2100", debit: opts.tax, description: `Tax on return ${opts.return_no}` });
+  lines.push({ account_code: refundCode, credit: opts.total, description: opts.refund === "cash" ? `Refund ${opts.return_no}` : `Credit ${opts.return_no}` });
+  if (opts.cost > 0) {
+    lines.push({ account_code: "1300", debit: opts.cost, description: `Stock returned ${opts.return_no}` });
+    lines.push({ account_code: "5000", credit: opts.cost, description: `COGS reversed ${opts.return_no}` });
+  }
+  return postJournal({ date: opts.date, description: `Sales return ${opts.return_no}`, source_type: "sale", source_id: opts.source_id, lines, logModule: "returns" });
+}
+
+/**
+ * Purchase return journal. Goods go back to the supplier.
+ *   Dr <settle target>  [total]  — A/P (2000) if owed, else Cash (1010) refund in
+ *      Cr Inventory (1300)  [net]
+ *      Cr Tax Payable (2100) [tax]  — reverse input tax
+ */
+export async function postPurchaseReturnJournal(opts: {
+  date: string; return_no: string; source_id: string;
+  net: number; tax: number; total: number;
+  refund: "cash" | "balance"; cashCode?: string;
+}): Promise<{ ok: boolean; error?: string; entry_id?: string }> {
+  const settleCode = opts.refund === "cash" ? (opts.cashCode || "1010") : "2000";
+  const lines: LineInput[] = [
+    { account_code: settleCode, debit: opts.total, description: opts.refund === "cash" ? `Refund in ${opts.return_no}` : `A/P reduced ${opts.return_no}` },
+    { account_code: "1300", credit: opts.net, description: `Stock returned ${opts.return_no}` },
+  ];
+  if (opts.tax > 0) lines.push({ account_code: "2100", credit: opts.tax, description: `Input tax reversed ${opts.return_no}` });
+  return postJournal({ date: opts.date, description: `Purchase return ${opts.return_no}`, source_type: "purchase", source_id: opts.source_id, lines, logModule: "returns" });
+}
+
+/**
  * Reverse a previously-posted journal by inserting a mirror entry. Used when a
  * sale or purchase is cancelled.
  */
@@ -381,7 +494,9 @@ export async function recomputeSaleStatus(sale_id: string) {
       .from("payments")
       .select("amount")
       .eq("sale_id", sale_id)
-      .eq("direction", "in");
+      .eq("direction", "in")
+      // Payments held for / rejected by approval haven't moved money yet.
+      .not("approval_status", "in", "(pending,rejected)");
     const paid = (pays || []).reduce((s, p) => s + Number(p.amount), 0);
     const next = paid >= Number(sale.total) - 0.01 ? "paid" : "confirmed";
     await admin.from("sales").update({ status: next, amount_paid: paid }).eq("id", sale_id);
@@ -400,7 +515,9 @@ export async function recomputePurchaseStatus(purchase_id: string) {
       .from("payments")
       .select("amount")
       .eq("purchase_id", purchase_id)
-      .eq("direction", "out");
+      .eq("direction", "out")
+      // Payments held for / rejected by approval haven't moved money yet.
+      .not("approval_status", "in", "(pending,rejected)");
     const paid = (pays || []).reduce((s, p) => s + Number(p.amount), 0);
     const next = paid >= Number(po.total) - 0.01 ? "paid" : "received";
     await admin.from("purchases").update({ status: next, amount_paid: paid }).eq("id", purchase_id);
@@ -414,12 +531,15 @@ export async function recomputePurchaseStatus(purchase_id: string) {
 export async function recomputeCustomerBalance(customer_id: string | null) {
   if (!customer_id) return;
   const admin = createServiceClient();
-  const { data: rows } = await admin
-    .from("sales")
-    .select("total, amount_paid, status")
-    .eq("customer_id", customer_id)
-    .neq("status", "cancelled");
-  const bal = (rows || []).reduce((s, r) => s + (Number(r.total) - Number(r.amount_paid || 0)), 0);
+  const [{ data: rows }, { data: cust }, { data: rets }] = await Promise.all([
+    admin.from("sales").select("total, amount_paid, status").eq("customer_id", customer_id).neq("status", "cancelled"),
+    admin.from("customers").select("opening_balance").eq("id", customer_id).single(),
+    // Credit returns reduce what the customer owes (cash refunds don't touch A/R).
+    admin.from("sales_returns").select("total").eq("customer_id", customer_id).eq("status", "posted").eq("refund_method", "credit"),
+  ]);
+  const opening = Number(cust?.opening_balance || 0);
+  const creditReturns = (rets || []).reduce((s, r) => s + Number(r.total || 0), 0);
+  const bal = opening + (rows || []).reduce((s, r) => s + (Number(r.total) - Number(r.amount_paid || 0)), 0) - creditReturns;
   await admin.from("customers").update({ balance: Math.round(bal * 100) / 100 }).eq("id", customer_id);
 }
 
@@ -428,12 +548,15 @@ export async function recomputeCustomerBalance(customer_id: string | null) {
 export async function recomputeSupplierBalance(supplier_id: string | null) {
   if (!supplier_id) return;
   const admin = createServiceClient();
-  const { data: rows } = await admin
-    .from("purchases")
-    .select("total, amount_paid, status")
-    .eq("supplier_id", supplier_id)
-    .neq("status", "cancelled");
-  const bal = (rows || []).reduce((s, r) => s + (Number(r.total) - Number(r.amount_paid || 0)), 0);
+  const [{ data: rows }, { data: sup }, { data: rets }] = await Promise.all([
+    admin.from("purchases").select("total, amount_paid, status").eq("supplier_id", supplier_id).neq("status", "cancelled"),
+    admin.from("suppliers").select("opening_balance").eq("id", supplier_id).single(),
+    // "Balance" returns reduce what we owe (cash refunds don't touch A/P).
+    admin.from("purchase_returns").select("total").eq("supplier_id", supplier_id).eq("status", "posted").eq("refund_method", "balance"),
+  ]);
+  const opening = Number(sup?.opening_balance || 0);
+  const balanceReturns = (rets || []).reduce((s, r) => s + Number(r.total || 0), 0);
+  const bal = opening + (rows || []).reduce((s, r) => s + (Number(r.total) - Number(r.amount_paid || 0)), 0) - balanceReturns;
   await admin.from("suppliers").update({ balance: Math.round(bal * 100) / 100 }).eq("id", supplier_id);
 }
 

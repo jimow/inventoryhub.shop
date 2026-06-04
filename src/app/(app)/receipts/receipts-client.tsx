@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -55,9 +56,15 @@ export function ReceiptsClient({
   const columns: Column<Payment>[] = [
     { key: "payment_no", label: "Receipt #", className: "w-[140px] font-medium" },
     { key: "date", label: "Date & time", className: "w-[150px] whitespace-nowrap", render: (r) => formatDateTime(r.created_at) },
-    { key: "sale", label: "Invoice", render: (r) => saleMap.get(r.sale_id || "")?.invoice_no || "-" },
+    { key: "sale", label: "Invoice", render: (r) => {
+      const inv = saleMap.get(r.sale_id || "")?.invoice_no;
+      return inv ? <Link href={`/sales?q=${encodeURIComponent(inv)}`} className="font-mono text-blue-600 hover:underline">{inv}</Link> : <span className="text-slate-400">-</span>;
+    } },
     { key: "customer", label: "Customer",
-      render: (r) => customerMap.get(r.customer_id || "")?.name || <span className="text-muted-foreground">Walk-in</span> },
+      render: (r) => {
+        const c = customerMap.get(r.customer_id || "");
+        return c ? <Link href={`/customers/${c.id}`} className="text-blue-600 hover:underline">{c.name}</Link> : <span className="text-muted-foreground">Walk-in</span>;
+      } },
     { key: "method", label: "Method",
       render: (r) => {
         const m = methodMap.get(r.payment_method_id || "");
@@ -291,6 +298,7 @@ function SaleReceiptDialog({
   const [methodId, setMethodId] = useState(methods[0]?.id || "");
   const [reference, setReference] = useState("");
   const [amount, setAmount] = useState("");
+  const [fee, setFee] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [memo, setMemo] = useState("");
   const today = new Date().toISOString().slice(0, 10);
@@ -351,9 +359,11 @@ function SaleReceiptDialog({
     }
     if (allocations.length === 0) { toast.error("Nothing to allocate"); return; }
 
+    const feeNum = Math.max(0, Number(fee) || 0);
     start(async () => {
       let firstReceiptNo: string | undefined;
-      for (const { sale, apply } of allocations) {
+      for (let i = 0; i < allocations.length; i++) {
+        const { sale, apply } = allocations[i];
         const r = await recordPayment({
           direction: "in",
           source_type: "sale",
@@ -361,6 +371,7 @@ function SaleReceiptDialog({
           customer_id: sale.customer_id,
           payment_method_id: methodId,
           amount: apply,
+          fee: i === 0 ? feeNum : 0, // charge applies once to the whole receipt
           reference: reference || null,
           date,
           notes: memo || null,
@@ -500,6 +511,12 @@ function SaleReceiptDialog({
                   <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)}
                     placeholder="M-Pesa code / cheque #" />
                 </div>
+                <div>
+                  <Label htmlFor="fee">Txn charge deducted</Label>
+                  <Input id="fee" type="number" step="0.01" min="0" value={fee}
+                    onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
+                  <p className="text-[11px] text-muted-foreground mt-0.5">You receive amount − fee; fee → Bank Charges.</p>
+                </div>
               </div>
               <div>
                 <Label htmlFor="memo">Memo (internal note)</Label>
@@ -545,6 +562,7 @@ function CustomerDepositDialog({
   const [methodId, setMethodId] = useState(methods[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [reference, setReference] = useState("");
+  const [fee, setFee] = useState("");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -556,6 +574,7 @@ function CustomerDepositDialog({
         customer_id: customerId,
         amount: amt,
         payment_method_id: methodId,
+        fee: Math.max(0, Number(fee) || 0),
         reference: reference || null,
       });
       if (!r.ok) { toast.error(r.error || "Failed"); return; }
@@ -592,9 +611,15 @@ function CustomerDepositDialog({
                 onChange={(e) => setAmount(e.target.value)} required />
             </div>
           </div>
-          <div>
-            <Label htmlFor="ref">Reference</Label>
-            <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="ref">Reference</Label>
+              <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="fee">Txn charge deducted</Label>
+              <Input id="fee" type="number" step="0.01" min="0" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
+            </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
@@ -621,6 +646,7 @@ function OtherIncomeDialog({
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [reference, setReference] = useState("");
+  const [fee, setFee] = useState("");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -633,6 +659,7 @@ function OtherIncomeDialog({
         income_account_code: accountCode,
         payment_method_id: methodId,
         description: description.trim(),
+        fee: Math.max(0, Number(fee) || 0),
         reference: reference || null,
       });
       if (!r.ok) { toast.error(r.error || "Failed"); return; }
@@ -678,6 +705,10 @@ function OtherIncomeDialog({
             <div>
               <Label htmlFor="ref">Reference</Label>
               <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="fee">Txn charge deducted</Label>
+              <Input id="fee" type="number" step="0.01" min="0" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
             </div>
           </div>
           <DialogFooter>

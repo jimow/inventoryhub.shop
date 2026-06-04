@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Pencil, Plus, Trash2, CheckCircle2, XCircle, Upload } from "lucide-react";
+import { Pencil, Plus, Trash2, CheckCircle2, XCircle, Upload, Eye, Receipt } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,9 @@ export function CustomersClient({
     { key: "credit_limit", label: "Credit", className: "w-[110px] text-right tabular-nums",
       render: (r) => formatMoney(r.credit_limit, sym) },
     ...(canSeeBalance ? [{
+      key: "opening_balance", label: "Opening", className: "w-[110px] text-right tabular-nums text-slate-500",
+      render: (r: Customer) => Number(r.opening_balance || 0) !== 0 ? formatMoney(Number(r.opening_balance), sym) : <span className="text-slate-300">—</span>,
+    }, {
       key: "balance", label: "Balance", className: "w-[120px] text-right tabular-nums font-semibold",
       render: (r: Customer) => (
         <span className={Number(r.balance) > 0 ? "text-amber-700" : Number(r.balance) < 0 ? "text-emerald-700" : "text-slate-500"}>
@@ -109,8 +112,16 @@ export function CustomersClient({
         bulkActions={bulkActions}
         rowActions={(row) => (
           <>
+            <Button asChild variant="ghost" size="icon" title="View statement" className="h-8 w-8">
+              <Link href={`/customers/${row.id}`}><Eye className="h-4 w-4" /></Link>
+            </Button>
+            {can(permissions, "sales", "create") && (
+              <Button asChild variant="ghost" size="icon" title="New sale" className="h-8 w-8 text-blue-600">
+                <Link href={`/sales?new=1&customer_id=${row.id}`}><Receipt className="h-4 w-4" /></Link>
+              </Button>
+            )}
             {can(permissions, "customers", "edit") && (
-              <Button variant="ghost" size="icon" onClick={() => setEditing(row)} title="Edit">
+              <Button variant="ghost" size="icon" onClick={() => setEditing(row)} title="Edit" className="h-8 w-8">
                 <Pencil className="h-4 w-4" />
               </Button>
             )}
@@ -176,6 +187,16 @@ function CustomerDialog({ customer, onClose }: { customer: Customer | null; onCl
             <Input id="tax_id" name="tax_id" defaultValue={customer?.tax_id ?? ""} /></div>
           <div className="col-span-6"><Label htmlFor="credit_limit">Credit Limit</Label>
             <Input id="credit_limit" name="credit_limit" type="number" step="0.01" min="0" defaultValue={customer?.credit_limit ?? 0} /></div>
+          {!customer && (
+            <>
+              <div className="col-span-6"><Label htmlFor="opening_balance">Opening balance (owes us)</Label>
+                <Input id="opening_balance" name="opening_balance" type="number" step="0.01" min="0" defaultValue={0} />
+                <p className="text-[11px] text-muted-foreground mt-0.5">Posts Dr A/R · Cr Opening Balance Equity.</p>
+              </div>
+              <div className="col-span-6"><Label htmlFor="opening_date">As of date</Label>
+                <Input id="opening_date" name="opening_date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></div>
+            </>
+          )}
           <div className="col-span-6"><Label htmlFor="status">Status</Label>
             <Select id="status" name="status" defaultValue={customer?.status || "active"}>
               <option value="active">Active</option>

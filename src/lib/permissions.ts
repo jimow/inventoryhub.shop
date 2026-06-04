@@ -9,12 +9,16 @@ export const MODULES = [
   "suppliers",
   "sales",
   "purchases",
+  "returns",
   "payments",
   "employees",
   "payroll",
   "accounting",
+  "equity",
+  "loans",
   "users",
   "roles",
+  "audit",
   "settings",
 ] as const;
 
@@ -43,6 +47,7 @@ export const ACTION_LABELS: Record<Action, string> = {
  */
 export const MODULE_EXTRA_ACTIONS: Partial<Record<Module, readonly Action[]>> = {
   payroll: ["approve", "post"],
+  payments: ["approve"],
   customers: ["balances"],
   suppliers: ["balances"],
 };
@@ -69,12 +74,16 @@ export const MODULE_LABELS: Record<Module, string> = {
   suppliers: "Suppliers",
   sales: "Sales",
   purchases: "Purchases",
+  returns: "Returns",
   payments: "Payments",
   employees: "Employees",
   payroll: "Payroll",
   accounting: "Accounting",
+  equity: "Equity & Shareholders",
+  loans: "Loans",
   users: "Users",
   roles: "Roles & Permissions",
+  audit: "Activity Log",
   settings: "Settings",
 };
 
@@ -86,12 +95,16 @@ export const MODULE_DESCRIPTIONS: Record<Module, string> = {
   suppliers:  "Supplier master data, payment terms, balances.",
   sales:      "Create sales / invoices, confirm, cancel, record payments.",
   purchases:  "Create purchase orders, receive stock, record supplier payments.",
+  returns:    "Record sales returns and purchase returns with stock + journal reversal.",
   payments:   "Record payments in/out and view full payment ledger.",
   employees:  "Employee directory, commission settings and master data.",
   payroll:    "Start payroll runs and disburse salary payments with double-entry posting.",
   accounting: "Bank accounts, payment methods, chart of accounts, journal, reports.",
+  equity:     "Shareholders and their capital contributions / withdrawals.",
+  loans:      "Money borrowed from others and lent to others, with repayments.",
   users:      "Add / disable users and assign their roles.",
   roles:      "Define roles and grant per-module permissions.",
+  audit:      "View the system activity / audit log of all transactions.",
   settings:   "Company info, currency, tax rate, numbering, categories, units.",
 };
 

@@ -113,6 +113,12 @@ export function LoginForm() {
       <p className="text-xs text-slate-400 text-center mt-6">
         First user automatically becomes the Administrator.
       </p>
+
+      <div className="mt-4 pt-4 border-t text-center">
+        <a href="/platform" className="text-xs text-slate-400 hover:text-slate-600">
+          Platform administrator? Open the console →
+        </a>
+      </div>
     </div>
   );
 }

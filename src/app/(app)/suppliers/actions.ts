@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { requirePermission } from "@/lib/auth";
 import { reserveNextNumber, getSettings } from "@/lib/numbering";
+import { postOpeningBalanceJournal } from "@/lib/accounting";
 import { objectsToCsv } from "@/lib/csv";
 
 type Result = { ok: boolean; error?: string };
@@ -30,10 +31,34 @@ export async function createSupplier(formData: FormData): Promise<Result> {
     const payload = readPayload(formData);
     if (!payload.code) payload.code = await reserveNextNumber("nextSupplier", cfg.numbering?.supplierPrefix || "SUP-");
     if (!payload.name) return { ok: false, error: "Name is required" };
+
+    // Opening balance: what we already owe this supplier when first entered.
+    const opening = Math.max(0, Number(formData.get("opening_balance") || 0) || 0);
+    const openingDate = String(formData.get("opening_date") || "") || new Date().toISOString().slice(0, 10);
+
     const supabase = await createClient();
-    const { error } = await supabase.from("suppliers").insert(payload);
-    if (error) return { ok: false, error: error.message };
+    const { data: created, error } = await supabase
+      .from("suppliers")
+      .insert({
+        ...payload,
+        opening_balance: opening,
+        opening_date: opening > 0 ? openingDate : null,
+        balance: opening,
+      })
+      .select("id")
+      .single();
+    if (error || !created) return { ok: false, error: error?.message || "Failed to create supplier" };
+
+    if (opening > 0) {
+      const j = await postOpeningBalanceJournal({
+        party: "supplier", partyId: created.id as string, name: payload.name,
+        amount: opening, date: openingDate,
+      });
+      if (!j.ok) return { ok: false, error: `Supplier saved, but opening-balance journal failed: ${j.error}` };
+    }
+
     revalidatePath("/suppliers");
+    revalidatePath("/reports");
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

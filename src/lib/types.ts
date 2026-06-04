@@ -75,6 +75,8 @@ export type Customer = {
   tax_id: string | null;
   credit_limit: number;
   balance: number;
+  opening_balance?: number;
+  opening_date?: string | null;
   status: Status;
   created_at: string;
   updated_at: string;
@@ -92,9 +94,53 @@ export type Supplier = {
   tax_id: string | null;
   payment_terms: string;
   balance: number;
+  opening_balance?: number;
+  opening_date?: string | null;
   status: Status;
   created_at: string;
   updated_at: string;
+};
+
+export type ReturnLine = {
+  refId: string;
+  name: string;
+  qty: number;
+  price: number;
+  unit_ids?: string[];
+};
+
+export type SalesReturn = {
+  id: string;
+  return_no: string | null;
+  sale_id: string | null;
+  customer_id: string | null;
+  date: string;
+  items: ReturnLine[];
+  subtotal: number;
+  tax: number;
+  total: number;
+  refund_method: "cash" | "credit";
+  payment_method_id: string | null;
+  notes: string | null;
+  status: "posted" | "cancelled";
+  created_at: string;
+};
+
+export type PurchaseReturn = {
+  id: string;
+  return_no: string | null;
+  purchase_id: string | null;
+  supplier_id: string | null;
+  date: string;
+  items: ReturnLine[];
+  subtotal: number;
+  tax: number;
+  total: number;
+  refund_method: "cash" | "balance";
+  payment_method_id: string | null;
+  notes: string | null;
+  status: "posted" | "cancelled";
+  created_at: string;
 };
 
 export type SaleLine = {
@@ -131,6 +177,8 @@ export type PurchaseLine = {
   name: string;
   qty: number;
   price: number;
+  /** Optional per-item landed charge (freight/handling for this line). */
+  charge?: number;
 };
 
 export type Purchase = {
@@ -143,6 +191,9 @@ export type Purchase = {
   discount: number;
   tax_rate: number;
   tax: number;
+  /** Header-level landed charges capitalized into inventory cost. */
+  transport_cost?: number;
+  other_charges?: number;
   total: number;
   status: PurchaseStatus;
   purchase_type: PurchaseType;
@@ -192,6 +243,20 @@ export type SettingsData = {
     inclusive?: boolean;
     registrationNo?: string;
   };
+  dividend?: {
+    rate?: number;                 // default dividend rate %
+    frequency?: "monthly" | "quarterly" | "half" | "yearly";
+  };
+  equity?: {
+    /** How each shareholder's ownership % is decided. "contribution" derives it
+     *  from net capital contributed; "fixed" uses the manually-entered %. */
+    ownershipMode?: "contribution" | "fixed";
+  };
+  approvals?: {
+    /** Ascending amount thresholds. The number of thresholds a money-out
+     *  payment meets = number of approval levels it needs. Empty = none. */
+    tiers?: number[];
+  };
   pos?: {
     quickAmounts?: number[];
     requireCustomer?: boolean;
@@ -220,6 +285,8 @@ export type SettingsData = {
     confirmCancel?: boolean;
     allowBackdate?: boolean;
     maxBackdateDays?: number;
+    /** Show the selected customer's balance + credit limit on the sale screen. */
+    showCustomerCredit?: boolean;
   };
   purchases?: {
     defaultCreditDays?: number;
@@ -248,6 +315,12 @@ export type SettingsData = {
     nextJournal: number;
     nextSalaryPayment?: number;
     nextPayrollRun?: number;
+    nextEquity?: number;
+    nextLoan?: number;
+    nextLoanPayment?: number;
+    nextDividend?: number;
+    nextSalesReturn?: number;
+    nextPurchaseReturn?: number;
   };
   productCategories: string[];
   units: string[];
@@ -331,6 +404,12 @@ export type Payment = {
   change_due: number | null;
   reference: string | null;
   notes: string | null;
+  /** Bank/M-Pesa/card fee deducted on this payment or receipt (expensed to 5200). */
+  fee?: number;
+  /** Tiered approval workflow (money-out). */
+  approval_status?: "not_required" | "pending" | "approved" | "rejected";
+  required_levels?: number;
+  approvals?: { user_id: string; name: string; at: string }[];
   created_at: string;
   created_by: string | null;
 };
@@ -429,6 +508,125 @@ export type SalaryPayment = {
   run_id: string | null;
   status: SalaryPaymentStatus;
   notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
+/* ===========================================================================
+   Equity & Shareholders (migration 00025)
+   =========================================================================== */
+
+export type Shareholder = {
+  id: string;
+  code: string | null;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  ownership_pct: number;
+  notes: string | null;
+  status: Status;
+  created_at: string;
+  created_by: string | null;
+};
+
+export type EquityContributionKind = "contribution" | "withdrawal";
+
+export type EquityContribution = {
+  id: string;
+  contribution_no: string | null;
+  shareholder_id: string;
+  date: string;
+  kind: EquityContributionKind;
+  amount: number;
+  /** "cash" = via a payment method; "opening" = in-kind claim of opening equity. */
+  source?: "cash" | "opening";
+  payment_method_id: string | null;
+  journal_entry_id: string | null;
+  status: "posted" | "cancelled";
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
+/* ===========================================================================
+   Loans — borrowing & lending (migration 00026)
+   =========================================================================== */
+
+export type LoanDirection = "payable" | "receivable"; // payable = we borrowed; receivable = we lent
+export type LoanStatus = "active" | "settled" | "cancelled";
+
+export type Loan = {
+  id: string;
+  loan_no: string | null;
+  direction: LoanDirection;
+  party_name: string;
+  principal: number;
+  interest_rate: number;
+  start_date: string;
+  due_date: string | null;
+  status: LoanStatus;
+  payment_method_id: string | null;
+  journal_entry_id: string | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
+export type LoanPayment = {
+  id: string;
+  payment_no: string | null;
+  loan_id: string;
+  date: string;
+  amount: number;
+  principal_portion: number;
+  interest_portion: number;
+  payment_method_id: string | null;
+  journal_entry_id: string | null;
+  status: "posted" | "cancelled";
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
+/* ===========================================================================
+   Dividends (migration 00027)
+   =========================================================================== */
+
+export type DividendFrequency = "monthly" | "quarterly" | "half" | "yearly";
+
+export type DividendDeclaration = {
+  id: string;
+  declaration_no: string | null;
+  date: string;
+  period_label: string | null;
+  rate: number;
+  base_amount: number;
+  total_amount: number;
+  status: "active" | "cancelled";
+  journal_entry_id: string | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
+export type DividendLine = {
+  id: string;
+  declaration_id: string;
+  shareholder_id: string;
+  ownership_pct: number;
+  amount: number;
+};
+
+export type DividendPayout = {
+  id: string;
+  payout_no: string | null;
+  declaration_id: string;
+  shareholder_id: string;
+  date: string;
+  amount: number;
+  payment_method_id: string | null;
+  journal_entry_id: string | null;
+  status: "posted" | "cancelled";
   created_at: string;
   created_by: string | null;
 };

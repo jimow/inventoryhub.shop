@@ -16,7 +16,7 @@ type SP = Promise<{ from?: string; to?: string; type?: string }>;
 
 type Row = {
   ts: string;
-  kind: "purchase" | "payment" | "expense";
+  kind: "purchase" | "payment" | "expense" | "opening";
   doc: string;
   detail: string;
   amount: number;
@@ -45,7 +45,20 @@ export default async function SupplierDetail({
     supabase.from("payments").select("*").eq("supplier_id", id).eq("direction", "out").order("date", { ascending: false }),
   ]);
 
+  const opening = Number(s.opening_balance || 0);
+  const openingDate = (s.opening_date || s.created_at || "").slice(0, 10);
+
   const rows: Row[] = [];
+  if (opening > 0) {
+    rows.push({
+      ts: openingDate,
+      kind: "opening",
+      doc: "Opening",
+      detail: "Opening balance brought forward (A/P)",
+      amount: opening,
+      status: "opening",
+    });
+  }
   for (const po of (purchases || []) as Purchase[]) {
     if (po.status === "cancelled") continue;
     rows.push({
@@ -80,9 +93,12 @@ export default async function SupplierDetail({
 
   const totalPurchased = (purchases || []).filter((x) => x.status !== "cancelled").reduce((sum, x) => sum + Number(x.total), 0);
   const totalPaid      = (payments || []).reduce((sum, x) => sum + Number(x.amount), 0);
-  const outstanding    = (purchases || [])
-    .filter((x) => x.status === "received")
+  // A/P balance = opening brought forward + everything still unpaid on non-
+  // cancelled POs. Computed live so it always reflects the opening.
+  const poOutstanding  = (purchases || [])
+    .filter((x) => x.status !== "cancelled")
     .reduce((sum, x) => sum + Math.max(0, Number(x.total) - Number(x.amount_paid || 0)), 0);
+  const outstanding = opening + poOutstanding;
   const overdueCount   = (purchases || []).filter((x) => {
     if (!x.due_date || x.status === "paid" || x.status === "cancelled") return false;
     return new Date(x.due_date) < new Date();
@@ -106,10 +122,11 @@ export default async function SupplierDetail({
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
         <Stat label="Total purchased"  value={formatMoney(totalPurchased)} icon={ShoppingCart} color="bg-amber-500" />
         <Stat label="Total paid"       value={formatMoney(totalPaid)}      icon={Wallet}       color="bg-emerald-500" />
-        <Stat label="Outstanding"      value={formatMoney(outstanding)}    icon={Banknote}     color={outstanding > 0 ? "bg-red-500" : "bg-slate-400"} />
+        <Stat label="Opening balance"  value={formatMoney(opening)}        icon={Banknote}     color={opening > 0 ? "bg-violet-500" : "bg-slate-400"} />
+        <Stat label="Balance (A/P)"    value={formatMoney(outstanding)}    icon={Banknote}     color={outstanding > 0 ? "bg-red-500" : "bg-slate-400"} />
         <Stat label="Overdue POs"      value={String(overdueCount)}        icon={AlertTriangle} color={overdueCount > 0 ? "bg-red-500" : "bg-slate-400"} />
       </div>
 
@@ -166,16 +183,18 @@ export default async function SupplierDetail({
                   <td className="p-3">
                     {r.kind === "purchase"
                       ? <Badge variant="warning">Purchase</Badge>
-                      : r.kind === "expense"
-                        ? <Badge variant="secondary">Expense</Badge>
-                        : <Badge variant="info">Payment</Badge>}
+                      : r.kind === "opening"
+                        ? <Badge variant="warning">Opening</Badge>
+                        : r.kind === "expense"
+                          ? <Badge variant="secondary">Expense</Badge>
+                          : <Badge variant="info">Payment</Badge>}
                   </td>
                   <td className="p-3 font-mono">
                     {r.url ? <Link href={r.url} className="text-blue-600 hover:underline">{r.doc}</Link> : r.doc}
                   </td>
                   <td className="p-3 text-slate-600">{r.detail}</td>
-                  <td className={`p-3 text-right font-semibold ${r.kind === "purchase" ? "text-amber-700" : "text-emerald-700"}`}>
-                    {r.kind === "purchase" ? "" : "-"}{formatMoney(r.amount)}
+                  <td className={`p-3 text-right font-semibold ${r.kind === "purchase" || r.kind === "opening" ? "text-amber-700" : "text-emerald-700"}`}>
+                    {r.kind === "purchase" || r.kind === "opening" ? "" : "-"}{formatMoney(r.amount)}
                   </td>
                   <td className="p-3">{r.status ? <Badge variant="secondary">{r.status}</Badge> : "-"}</td>
                 </tr>

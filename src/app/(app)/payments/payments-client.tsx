@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
   ArrowUpFromLine, Plus, Wallet, Receipt as ReceiptIcon,
-  Banknote, Building2, ChevronDown,
+  Banknote, Building2, ChevronDown, ShieldAlert,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,7 @@ import { can } from "@/lib/permissions";
 import { formatMoney, formatDate, formatDateTime } from "@/lib/utils";
 import {
   deletePayment, recordPayment, recordExpense, recordOwnerDrawing, recordBankTransfer,
+  approvePayment, rejectPayment,
 } from "./actions";
 
 type OpenPurchase = { id: string; po_no: string; date: string; due_date: string | null; total: number; amount_paid: number; supplier_id: string | null };
@@ -46,19 +48,49 @@ export function PaymentsClient({
   accounts: Account[];
   permissions: PermissionMatrix;
 }) {
+  const router = useRouter();
   useSearchParams();
   const [newKind, setNewKind] = useState<NewPaymentKind>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const canCreate = can(permissions, "payments", "create");
+  const canApprove = can(permissions, "payments", "approve");
 
-  const outflows = payments.reduce((s, p) => s + Number(p.amount), 0);
+  // Only posted/immediate payments count as real outflow; pending/rejected don't.
+  const outflows = payments
+    .filter((p) => p.approval_status !== "pending" && p.approval_status !== "rejected")
+    .reduce((s, p) => s + Number(p.amount), 0);
+  const pendingCount = payments.filter((p) => p.approval_status === "pending").length;
+
+  async function doApprove(id: string) {
+    setBusyId(id);
+    const r = await approvePayment(id);
+    setBusyId(null);
+    if (!r.ok) { toast.error(r.error || "Failed"); return; }
+    toast.success("Approval recorded");
+    router.refresh();
+  }
+  async function doReject(id: string) {
+    setBusyId(id);
+    const r = await rejectPayment(id);
+    setBusyId(null);
+    if (!r.ok) { toast.error(r.error || "Failed"); return; }
+    toast.success("Payment rejected");
+    router.refresh();
+  }
 
   const columns: Column<Payment>[] = [
     { key: "payment_no", label: "Payment #", className: "w-[140px] font-medium" },
     { key: "date", label: "Date & time", className: "w-[150px] whitespace-nowrap", render: (r) => formatDateTime(r.created_at) },
     { key: "party", label: "Paid To",
       render: (r) => {
-        if (r.customer_id) return customers.find((c) => c.id === r.customer_id)?.name || "—";
-        if (r.supplier_id) return suppliers.find((s) => s.id === r.supplier_id)?.name || "—";
+        if (r.customer_id) {
+          const c = customers.find((x) => x.id === r.customer_id);
+          return c ? <Link href={`/customers/${c.id}`} className="text-blue-600 hover:underline">{c.name}</Link> : "—";
+        }
+        if (r.supplier_id) {
+          const s = suppliers.find((x) => x.id === r.supplier_id);
+          return s ? <Link href={`/suppliers/${s.id}`} className="text-blue-600 hover:underline">{s.name}</Link> : "—";
+        }
         return <span className="text-muted-foreground">—</span>;
       } },
     { key: "method", label: "Method", className: "w-[140px]",
@@ -66,6 +98,8 @@ export function PaymentsClient({
     { key: "reference", label: "Reference", className: "font-mono text-xs" },
     { key: "amount", label: "Amount", className: "w-[140px] text-right font-semibold",
       render: (r) => <span className="text-amber-700">-{formatMoney(r.amount)}</span> },
+    { key: "approval_status", label: "Status", className: "w-[150px]",
+      render: (r) => <ApprovalBadge p={r} /> },
   ];
 
   const filters: FilterDef[] = [
@@ -118,13 +152,21 @@ export function PaymentsClient({
         )}
       </PageHeader>
 
-      <div className="grid grid-cols-1 gap-3">
+      <div className={`grid grid-cols-1 ${pendingCount > 0 ? "sm:grid-cols-2" : ""} gap-3`}>
         <Card className="p-4 bg-gradient-to-br from-amber-50 to-amber-100/50 border-amber-200">
           <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-amber-700/80">
             <ArrowUpFromLine className="h-3.5 w-3.5" /> Total Paid Out
           </div>
           <div className="text-2xl font-bold text-amber-900 mt-1">{formatMoney(outflows)}</div>
         </Card>
+        {pendingCount > 0 && (
+          <Card className="p-4 bg-gradient-to-br from-violet-50 to-violet-100/50 border-violet-200">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-violet-700/80">
+              <ShieldAlert className="h-3.5 w-3.5" /> Awaiting Approval
+            </div>
+            <div className="text-2xl font-bold text-violet-900 mt-1">{pendingCount}</div>
+          </Card>
+        )}
       </div>
 
       <DataTable<Payment>
@@ -135,6 +177,18 @@ export function PaymentsClient({
         filters={filters}
         rowActions={(row) => (
           <>
+            {canApprove && row.approval_status === "pending" && (
+              <>
+                <Button size="sm" variant="outline" className="h-7 text-emerald-700 border-emerald-200"
+                  disabled={busyId === row.id} onClick={() => doApprove(row.id)}>
+                  Approve {row.approvals?.length ? `(${row.approvals.length}/${row.required_levels})` : ""}
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-red-700 border-red-200"
+                  disabled={busyId === row.id} onClick={() => doReject(row.id)}>
+                  Reject
+                </Button>
+              </>
+            )}
             {can(permissions, "payments", "delete") && (
               <DeleteButton action={() => deletePayment(row.id)} message="The journal entry will also be reversed." />
             )}
@@ -188,6 +242,7 @@ function SupplierPaymentDialog({
   const [methodId, setMethodId] = useState(methods[0]?.id || "");
   const [reference, setReference] = useState("");
   const [amount, setAmount] = useState("");
+  const [fee, setFee] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [memo, setMemo] = useState("");
   const today = new Date().toISOString().slice(0, 10);
@@ -247,9 +302,11 @@ function SupplierPaymentDialog({
       if (apply > 0.001) { allocations.push({ po, apply }); remaining -= apply; }
     }
 
+    const feeNum = Math.max(0, Number(fee) || 0);
     start(async () => {
       let firstNo: string | undefined;
-      for (const { po, apply } of allocations) {
+      for (let i = 0; i < allocations.length; i++) {
+        const { po, apply } = allocations[i];
         const r = await recordPayment({
           direction: "out",
           source_type: "purchase",
@@ -257,6 +314,7 @@ function SupplierPaymentDialog({
           supplier_id: po.supplier_id,
           payment_method_id: methodId,
           amount: apply,
+          fee: i === 0 ? feeNum : 0, // charge applies once to the whole payment
           reference: reference || null,
           date,
           notes: memo || null,
@@ -395,6 +453,12 @@ function SupplierPaymentDialog({
                   <Label htmlFor="ref">Reference</Label>
                   <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)}
                     placeholder="cheque #, txn id..." />
+                </div>
+                <div>
+                  <Label htmlFor="fee">Bank / txn charge</Label>
+                  <Input id="fee" type="number" step="0.01" min="0" value={fee}
+                    onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
+                  <p className="text-[11px] text-muted-foreground mt-0.5">Extra cash out, expensed to Bank Charges.</p>
                 </div>
               </div>
               <div>
@@ -548,6 +612,7 @@ function ExpenseDialog({
   const [description, setDescription] = useState("");
   const [supplierId, setSupplierId] = useState<string>("");
   const [reference, setReference] = useState("");
+  const [fee, setFee] = useState("");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -561,6 +626,7 @@ function ExpenseDialog({
         payment_method_id: methodId,
         description: description.trim(),
         supplier_id: supplierId || null,
+        fee: Math.max(0, Number(fee) || 0),
         reference: reference || null,
       });
       if (!r.ok) { toast.error(r.error || "Failed"); return; }
@@ -610,9 +676,15 @@ function ExpenseDialog({
                 placeholder="Vendor" />
             </div>
           </div>
-          <div>
-            <Label htmlFor="ref">Reference</Label>
-            <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Receipt no. / txn id" />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="ref">Reference</Label>
+              <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Receipt no. / txn id" />
+            </div>
+            <div>
+              <Label htmlFor="fee">Bank / txn charge</Label>
+              <Input id="fee" type="number" step="0.01" min="0" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
+            </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
@@ -641,6 +713,7 @@ function OtherPaymentDialog({
   const [methodId, setMethodId] = useState(methods[0]?.id || "");
   const [description, setDescription] = useState("");
   const [reference, setReference] = useState("");
+  const [fee, setFee] = useState("");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -652,6 +725,7 @@ function OtherPaymentDialog({
         payment_method_id: methodId,
         debit_account_code: accountCode,
         description: description.trim() || undefined,
+        fee: Math.max(0, Number(fee) || 0),
         reference: reference || null,
       });
       if (!r.ok) { toast.error(r.error || "Failed"); return; }
@@ -697,6 +771,10 @@ function OtherPaymentDialog({
             <div>
               <Label htmlFor="ref">Reference</Label>
               <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="fee">Bank / txn charge</Label>
+              <Input id="fee" type="number" step="0.01" min="0" value={fee} onChange={(e) => setFee(e.target.value)} placeholder="0.00" />
             </div>
           </div>
           <DialogFooter>
@@ -791,6 +869,21 @@ function BankTransferDialog({ methods, onClose }: { methods: PaymentMethod[]; on
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ApprovalBadge({ p }: { p: Payment }) {
+  const st = p.approval_status;
+  if (!st || st === "not_required") return <Badge variant="success">Posted</Badge>;
+  if (st === "approved") return <Badge variant="success">Approved</Badge>;
+  if (st === "rejected") return <Badge variant="danger">Rejected</Badge>;
+  // pending
+  const got = p.approvals?.length || 0;
+  const need = p.required_levels || 1;
+  return (
+    <Badge variant="warning" title={(p.approvals || []).map((a) => a.name).join(", ")}>
+      Pending {got}/{need}
+    </Badge>
   );
 }
 

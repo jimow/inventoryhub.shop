@@ -4,10 +4,16 @@ import { Sidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
 import { NavProgress } from "@/components/nav-progress";
 import { getCurrentSession } from "@/lib/auth";
+import { getActiveTenantStatus } from "@/lib/tenant-guard";
 import { getSettings } from "@/lib/numbering";
 import { isInstalled, activeSchema } from "@/lib/tenant";
 import { SettingsProvider } from "@/lib/settings-context";
 import { setLocaleFromSettings } from "@/lib/utils";
+
+// Every authenticated page reads cookies (auth) and per-tenant data, so none of
+// them can be statically prerendered. Forcing dynamic here covers all routes
+// under (app) and prevents the "static to dynamic at runtime" error.
+export const dynamic = "force-dynamic";
 
 function isRedirect(e: unknown): boolean {
   return typeof (e as { digest?: string })?.digest === "string" &&
@@ -31,6 +37,18 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const { profile, role, permissions } = session;
   // Server-side locale cache for any server component that calls formatMoney/formatDate
   setLocaleFromSettings(settings);
+
+  // Platform-enforced lifecycle: a suspended/locked tenant is fully blocked.
+  const tenantStatus = await getActiveTenantStatus();
+  if (tenantStatus.status === "suspended" || tenantStatus.status === "locked") {
+    return (
+      <TenantBlocked
+        status={tenantStatus.status}
+        reason={tenantStatus.reason}
+        name={tenantStatus.name || settings?.company?.name || "This workspace"}
+      />
+    );
+  }
 
   if (!role) {
     return (
@@ -59,11 +77,52 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             role: role.name,
           }}
         />
-        <main className="md:ml-60 pt-14">
+        <main className="md:ml-64 pt-14">
+          {tenantStatus.status === "read_only" && (
+            <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-sm text-amber-800 flex items-center gap-2">
+              <span className="font-semibold">Read-only mode.</span>
+              <span>
+                Changes are disabled by the administrator
+                {tenantStatus.reason ? ` — ${tenantStatus.reason}` : ""}. You can still view all data.
+              </span>
+            </div>
+          )}
           <div className="p-6">{children}</div>
         </main>
       </div>
     </SettingsProvider>
+  );
+}
+
+/** Shown when a platform admin has suspended or locked this workspace. */
+function TenantBlocked({
+  status, reason, name,
+}: { status: "suspended" | "locked"; reason: string | null; name: string }) {
+  const locked = status === "locked";
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+      <div className="max-w-md w-full bg-white border rounded-2xl p-8 shadow-sm text-center">
+        <div className={`mx-auto h-14 w-14 rounded-2xl flex items-center justify-center ${locked ? "bg-red-100" : "bg-amber-100"}`}>
+          <span className="text-2xl">{locked ? "🔒" : "⏸️"}</span>
+        </div>
+        <h1 className="mt-4 text-xl font-semibold text-slate-900">
+          {name} is {locked ? "locked" : "suspended"}
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          {locked
+            ? "Access to this workspace has been locked by the system administrator."
+            : "Access to this workspace has been temporarily suspended by the system administrator."}
+        </p>
+        {reason && (
+          <p className="mt-3 text-sm text-slate-700 bg-slate-50 border rounded-lg px-3 py-2">
+            <span className="font-medium">Reason:</span> {reason}
+          </p>
+        )}
+        <p className="mt-4 text-xs text-slate-500">
+          Please contact your administrator to restore access.
+        </p>
+      </div>
+    </div>
   );
 }
 

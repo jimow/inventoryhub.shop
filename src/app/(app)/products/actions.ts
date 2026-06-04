@@ -225,16 +225,17 @@ async function postOpeningStockJournal(opts: {
   // Pick the CONTRA account for the inventory leg.
   //
   // Opening balance (product created/imported with stock > 0):
-  //   The owner is contributing inventory to the business — this is a capital
-  //   contribution, NOT a P&L event. Credit Owner Equity (3000) so the books
-  //   balance: Dr Inventory / Cr Owner Equity.
+  //   Capital contributed in kind — NOT a P&L event. Credit Opening Balance
+  //   Equity (3200), the "not-yet-attributed" opening pool. Shareholders then
+  //   claim their share of it via an in-kind contribution (Dr 3200 / Cr 3000),
+  //   which is how opening stock flows into each owner's shares.
   //
   // Count / found / shrinkage (operational adjustments after launch):
   //   These are real P&L events — value gained or lost. Route to the Inventory
   //   Adjustment expense account (5700) per the original behaviour.
   // ---------------------------------------------------------------------------
   const isOpeningBalance = opts.reason === "opening_balance";
-  const contraCode = isOpeningBalance ? "3000" : "5700";
+  const contraCode = isOpeningBalance ? "3200" : "5700";
 
   // Auto-create the standard chart of accounts if it isn't there yet, so a
   // freshly-provisioned shop can record opening stock without manual setup.
@@ -249,7 +250,7 @@ async function postOpeningStockJournal(opts: {
     unit_cost,
     total_value: totalValue,
     notes: isOpeningBalance
-      ? "Auto: opening stock — posted to Owner Equity"
+      ? "Auto: opening stock — posted to Opening Balance Equity"
       : null,
   }).select("id").single();
 

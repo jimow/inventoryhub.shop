@@ -26,7 +26,7 @@ export function Topbar({ user }: { user: { name: string; role: string } }) {
   }
 
   return (
-    <div className="fixed top-0 right-0 left-0 md:left-60 h-14 bg-white border-b border-slate-200 z-20 flex items-center justify-between px-6">
+    <div className="fixed top-0 right-0 left-0 md:left-64 h-14 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/65 border-b border-slate-200/80 shadow-[0_1px_2px_rgba(16,24,40,0.03)] z-20 flex items-center justify-between px-6">
       <h1 className="text-base font-semibold text-slate-900 tracking-tight">{title}</h1>
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2.5 px-1 py-1 pr-3 rounded-full hover:bg-slate-50 transition-colors">

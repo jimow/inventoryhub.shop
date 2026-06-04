@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   Save, Building2, DollarSign, Hash, Tags, Ruler, Wallet,
-  Palette, Globe, ScanLine, Printer, Boxes, Receipt as ReceiptIcon, ShoppingCart, BookOpen,
+  Palette, Globe, ScanLine, Printer, Boxes, Receipt as ReceiptIcon, ShoppingCart, BookOpen, ShieldCheck,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import {
   saveCompany, saveBranding, saveLocale, saveCurrencyTax,
   savePos, saveReceipt, saveInventory, saveSalesDefaults,
   savePurchasesDefaults, saveAccountingDefaults,
-  saveNumbering, saveCategories, saveUnits, savePaymentTerms,
+  saveNumbering, saveCategories, saveUnits, savePaymentTerms, saveApprovals,
 } from "./actions";
 
 const TABS = [
@@ -41,6 +41,7 @@ const TABS = [
   { id: "categories", label: "Categories",     icon: Tags },
   { id: "units",      label: "Units",          icon: Ruler },
   { id: "payment",    label: "Payment Terms",  icon: Wallet },
+  { id: "approvals",  label: "Payment Approvals", icon: ShieldCheck },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -87,6 +88,7 @@ export function SettingsClient({
           {tab === "categories" && <CategoriesTab data={settings} editable={editable} />}
           {tab === "units"      && <UnitsTab data={settings} editable={editable} />}
           {tab === "payment"    && <PaymentTab data={settings} editable={editable} />}
+          {tab === "approvals"  && <ApprovalsTab data={settings} editable={editable} />}
         </Card>
       </div>
     </div>
@@ -305,6 +307,31 @@ function CurrencyTab({ data, editable }: { data: SettingsData; editable: boolean
         <div className="col-span-3"><Label htmlFor="taxRegistrationNo">Tax Registration No. (shown on receipt)</Label>
           <Input id="taxRegistrationNo" name="taxRegistrationNo" defaultValue={tax.registrationNo} disabled={!editable} />
         </div>
+
+        <div className="col-span-3 border-t pt-3 mt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Dividends</div>
+        <div><Label htmlFor="dividendRate">Default Dividend Rate (%)</Label>
+          <Input id="dividendRate" name="dividendRate" type="number" step="0.01" min="0"
+            defaultValue={Number(data.dividend?.rate || 0)} disabled={!editable} />
+        </div>
+        <div><Label htmlFor="dividendFrequency">Dividend Frequency</Label>
+          <Select id="dividendFrequency" name="dividendFrequency" defaultValue={data.dividend?.frequency || "yearly"} disabled={!editable}>
+            <option value="monthly">Monthly</option>
+            <option value="quarterly">Quarterly</option>
+            <option value="half">Half-year</option>
+            <option value="yearly">Yearly</option>
+          </Select>
+        </div>
+
+        <div className="col-span-3 border-t pt-3 mt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Shareholder ownership</div>
+        <div className="col-span-2"><Label htmlFor="ownershipMode">How shares are decided</Label>
+          <Select id="ownershipMode" name="ownershipMode" defaultValue={data.equity?.ownershipMode || "contribution"} disabled={!editable}>
+            <option value="contribution">By contribution — auto % from capital contributed</option>
+            <option value="fixed">Fixed — type each owner&apos;s % manually</option>
+          </Select>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            Drives ownership % on the Equity page and how dividends are split.
+          </p>
+        </div>
       </div>
       <SaveBar pending={pending} editable={editable} />
     </form>
@@ -425,6 +452,7 @@ function SalesDefaultsTab({ data, editable }: { data: SettingsData; editable: bo
           <Input id="maxBackdateDays" name="maxBackdateDays" type="number" min="0"
             defaultValue={Number(s.maxBackdateDays ?? 7)} disabled={!editable} />
         </div>
+        <Toggle name="showCustomerCredit" label="Show customer balance & credit limit on the sale screen" defaultChecked={s.showCustomerCredit !== false} editable={editable} />
       </div>
       <SaveBar pending={pending} editable={editable} />
     </form>
@@ -557,6 +585,54 @@ function PaymentTab({ data, editable }: { data: SettingsData; editable: boolean 
       <h2 className="text-lg font-semibold mb-3">Payment Terms</h2>
       <Textarea name="paymentTerms" rows={8} disabled={!editable} defaultValue={(data.paymentTerms || []).join("\n")} />
       <p className="text-xs text-muted-foreground mt-1">One per line (e.g. Net 30)</p>
+      <SaveBar pending={pending} editable={editable} />
+    </form>
+  );
+}
+
+function ApprovalsTab({ data, editable }: { data: SettingsData; editable: boolean }) {
+  const { onSubmit, pending } = useFormSubmit(saveApprovals);
+  const tiers = (data.approvals?.tiers || []).slice().sort((a, b) => a - b);
+  return (
+    <form onSubmit={onSubmit}>
+      <h2 className="text-lg font-semibold mb-1">Payment Approvals</h2>
+      <p className="text-sm text-muted-foreground mb-4">
+        Set amount thresholds for money going <strong>out</strong> (supplier payments, expenses,
+        owner drawings). A payment is held until enough users with the
+        <strong> Payments → Approve</strong> permission sign off. The number of thresholds an
+        amount reaches = how many separate approvals it needs.
+      </p>
+
+      <Label htmlFor="approvalTiers">Approval thresholds</Label>
+      <Input
+        id="approvalTiers"
+        name="approvalTiers"
+        disabled={!editable}
+        defaultValue={tiers.join(", ")}
+        placeholder="e.g. 50000, 200000, 1000000"
+      />
+      <p className="text-xs text-muted-foreground mt-1">
+        Comma-separated amounts. Example: <code>50000, 200000</code> means payments ≥ 50,000 need
+        1 approval and payments ≥ 200,000 need 2 approvals. Leave blank to disable approvals
+        (everything posts immediately, still fund-checked).
+      </p>
+
+      {tiers.length > 0 && (
+        <div className="mt-4 rounded-md border bg-slate-50 p-3 text-sm">
+          <div className="font-medium mb-2">Current tiers</div>
+          <ul className="space-y-1">
+            {tiers.map((t, i) => (
+              <li key={i} className="flex items-center gap-2">
+                <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-100 px-1.5 text-xs font-semibold text-blue-700">
+                  {i + 1}
+                </span>
+                <span>Payments ≥ {t.toLocaleString()} require {i + 1} approval{i + 1 > 1 ? "s" : ""}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <SaveBar pending={pending} editable={editable} />
     </form>
   );

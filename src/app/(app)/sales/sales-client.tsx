@@ -1,11 +1,12 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Pencil, Plus, Eye, X, CheckCircle2, DollarSign, Trash2, Wallet,
   Printer, Receipt as ReceiptIcon, Banknote, Package, AlertCircle,
-  Loader2, Clock, FileEdit, Mail, Phone, User,
+  Loader2, Clock, FileEdit, Mail, Phone, User, ScanLine, Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -25,7 +26,7 @@ import { DeleteButton } from "@/components/delete-button";
 import { PageHeader } from "@/components/page-header";
 import { ExportButton } from "@/components/export-button";
 
-import type { Sale, SaleLine, SaleType, Product, Customer, PaymentMethod, SettingsData } from "@/lib/types";
+import type { Sale, SaleLine, SaleType, Product, Customer, PaymentMethod, SettingsData, SalesReturn } from "@/lib/types";
 import type { PermissionMatrix } from "@/lib/permissions";
 import { can } from "@/lib/permissions";
 import { formatMoney, formatDate, formatDateTime, currencySymbol, computeLineTotals } from "@/lib/utils";
@@ -34,6 +35,7 @@ import {
   recordSalePayment, bulkCancelSales, bulkDeleteSales, exportSales, listSaleUnits,
   type SaleReceipt,
 } from "./actions";
+import { SalesReturnDialog, ReturnDetailsDialog } from "../returns/return-dialogs";
 
 type Mode = "view" | "edit" | "create" | "pay" | null;
 
@@ -59,13 +61,15 @@ function isOverdue(sale: Sale) {
 /* MAIN LIST                                                                  */
 /* ========================================================================== */
 export function SalesClient({
-  sales, totalCount, customers, products, methods, settings, permissions,
+  sales, totalCount, customers, products, methods, returnsBySale, returnsListBySale, settings, permissions,
 }: {
   sales: Sale[];
   totalCount: number;
   customers: Customer[];
   products: Product[];
   methods: PaymentMethod[];
+  returnsBySale: Record<string, "full" | "partial">;
+  returnsListBySale: Record<string, SalesReturn[]>;
   settings: SettingsData;
   permissions: PermissionMatrix;
 }) {
@@ -73,12 +77,30 @@ export function SalesClient({
   const [active, setActive] = useState<Sale | null>(null);
   const [mode, setMode] = useState<Mode>(null);
   const [receipt, setReceipt] = useState<SaleReceipt | null>(null);
+  const [returning, setReturning] = useState<Sale | null>(null);
+  const [viewReturns, setViewReturns] = useState<SalesReturn[] | null>(null);
   const sym = currencySymbol(settings);
+
+  // Deep-link: /sales?new=1[&customer_id=â€¦] opens the New Sale editor
+  // (used by the "New sale" action on the customer list). Runs once.
+  const prefillCustomer = sp.get("customer_id") || "";
+  useEffect(() => {
+    if (sp.get("new") === "1") { setActive(null); setMode("create"); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const columns: Column<Sale>[] = [
     {
       key: "invoice_no", label: "Invoice", className: "w-[140px]",
-      render: (r) => <span className="font-mono font-medium text-slate-900">{r.invoice_no}</span>,
+      render: (r) => (
+        <button
+          onClick={() => { setActive(r); setMode("view"); }}
+          className="font-mono font-medium text-blue-600 hover:underline"
+          title="View invoice"
+        >
+          {r.invoice_no}
+        </button>
+      ),
     },
     { key: "date", label: "Date & time", className: "w-[150px] text-slate-600 whitespace-nowrap", render: (r) => formatDateTime(r.created_at) },
     {
@@ -87,11 +109,11 @@ export function SalesClient({
         const c = customers.find((x) => x.id === r.customer_id);
         return c ? (
           <div>
-            <div className="font-medium text-slate-900">{c.name}</div>
+            <Link href={`/customers/${c.id}`} className="font-medium text-blue-600 hover:underline">{c.name}</Link>
             {c.email && <div className="text-xs text-slate-500">{c.email}</div>}
           </div>
         ) : (
-          <span className="text-slate-400">—</span>
+          <span className="text-slate-400">â€”</span>
         );
       },
     },
@@ -107,7 +129,7 @@ export function SalesClient({
       key: "balance", label: "Balance", className: "w-[120px] text-right",
       render: (r) => {
         const bal = Number(r.total) - Number(r.amount_paid || 0);
-        if (r.status === "cancelled") return <span className="text-slate-400">—</span>;
+        if (r.status === "cancelled") return <span className="text-slate-400">â€”</span>;
         if (bal <= 0.001) return <span className="text-emerald-700 text-xs font-medium">Paid in full</span>;
         return (
           <span className={`tabular-nums ${isOverdue(r) ? "text-red-600 font-semibold" : "text-slate-700 font-medium"}`}>
@@ -117,8 +139,19 @@ export function SalesClient({
       },
     },
     {
-      key: "status", label: "Status", className: "w-[140px]",
-      render: (r) => <StatusBadge sale={r} />,
+      key: "status", label: "Status", className: "w-[160px]",
+      render: (r) => (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <StatusBadge sale={r} />
+          {returnsBySale[r.id] && (
+            <button type="button" onClick={() => setViewReturns(returnsListBySale[r.id] || [])} title="View what was returned">
+              <Badge variant="warning" className="gap-1 cursor-pointer hover:ring-2 hover:ring-amber-300">
+                <Undo2 className="h-3 w-3" /> {returnsBySale[r.id] === "full" ? "Returned" : "Part. returned"}
+              </Badge>
+            </button>
+          )}
+        </div>
+      ),
     },
   ];
 
@@ -176,13 +209,32 @@ export function SalesClient({
             onView={() => { setActive(row); setMode("view"); }}
             onEdit={() => { setActive(row); setMode("edit"); }}
             onPay={() => { setActive(row); setMode("pay"); }}
+            onPrint={() => printSaleInvoice(row, customers.find((c) => c.id === row.customer_id), settings)}
+            onReturn={() => setReturning(row)}
           />
         )}
       />
 
+      {returning && (
+        <SalesReturnDialog
+          sale={returning} products={products} methods={methods} settings={settings}
+          partyName={customers.find((c) => c.id === returning.customer_id)?.name}
+          onClose={() => setReturning(null)} />
+      )}
+
+      {viewReturns && (
+        <ReturnDetailsDialog
+          title="Returns against this sale"
+          refundLabels={{ cash: "Cash refund", credit: "Credit to customer" }}
+          returns={viewReturns}
+          settings={settings}
+          onClose={() => setViewReturns(null)} />
+      )}
+
       {mode === "create" && (
         <SaleEditor
           sale={null} customers={customers} products={products} settings={settings}
+          initialCustomerId={prefillCustomer}
           onClose={() => setMode(null)}
           onCashSuccess={(r) => { setMode(null); setReceipt(r); }}
         />
@@ -259,10 +311,10 @@ function StatusBadge({ sale }: { sale: Sale }) {
 /* ROW ACTIONS                                                                */
 /* ========================================================================== */
 function SalesRowActions({
-  row, permissions, onView, onEdit, onPay,
+  row, permissions, onView, onEdit, onPay, onPrint, onReturn,
 }: {
   row: Sale; permissions: PermissionMatrix;
-  onView: () => void; onEdit: () => void; onPay: () => void;
+  onView: () => void; onEdit: () => void; onPay: () => void; onPrint: () => void; onReturn: () => void;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -280,6 +332,14 @@ function SalesRowActions({
       <Button variant="ghost" size="icon" onClick={onView} title="View" className="h-8 w-8">
         <Eye className="h-4 w-4" />
       </Button>
+      <Button variant="ghost" size="icon" onClick={onPrint} title="Print invoice" className="h-8 w-8 text-slate-600">
+        <Printer className="h-4 w-4" />
+      </Button>
+      {row.status !== "cancelled" && row.status !== "draft" && can(permissions, "returns", "create") && (
+        <Button variant="ghost" size="icon" onClick={onReturn} title="Sales return" className="h-8 w-8 text-orange-600">
+          <Undo2 className="h-4 w-4" />
+        </Button>
+      )}
       {row.status === "draft" && can(permissions, "sales", "edit") && (
         <>
           <Button variant="ghost" size="icon" onClick={onEdit} title="Edit" className="h-8 w-8">
@@ -361,7 +421,7 @@ function PaymentDialog({
             Record Payment
           </DialogTitle>
           <DialogDescription>
-            Invoice <span className="font-mono font-medium">{sale.invoice_no}</span> · Outstanding{" "}
+            Invoice <span className="font-mono font-medium">{sale.invoice_no}</span> Â· Outstanding{" "}
             <span className="font-semibold text-slate-900 tabular-nums">{formatMoney(balance, sym)}</span>
           </DialogDescription>
         </DialogHeader>
@@ -385,7 +445,7 @@ function PaymentDialog({
           <div>
             <Label htmlFor="method">Payment Method *</Label>
             <Select id="method" value={methodId} onChange={(e) => setMethodId(e.target.value)} required>
-              <option value="">— Select —</option>
+              <option value="">â€” Select â€”</option>
               {methods.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </Select>
           </div>
@@ -419,7 +479,7 @@ function PaymentDialog({
 }
 
 /* ========================================================================== */
-/* SALE VIEWER — invoice-style preview                                        */
+/* SALE VIEWER â€” invoice-style preview                                        */
 /* ========================================================================== */
 function SaleViewer({
   sale, customers, settings, permissions, onClose, onEdit, onPay,
@@ -456,7 +516,7 @@ function SaleViewer({
           {/* Company + meta */}
           <div className="grid grid-cols-12 gap-4">
             <div className="col-span-12 sm:col-span-7">
-              <div className="text-lg font-bold text-slate-900">{company?.name || "—"}</div>
+              <div className="text-lg font-bold text-slate-900">{company?.name || "â€”"}</div>
               {company?.address && <div className="text-sm text-slate-600">{company.address}</div>}
               {company?.phone && <div className="text-sm text-slate-600">Tel: {company.phone}</div>}
               {company?.email && <div className="text-sm text-slate-600">{company.email}</div>}
@@ -489,10 +549,10 @@ function SaleViewer({
           {/* Bill to */}
           <div className="border rounded-lg p-4 bg-slate-50">
             <div className="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-1">Bill to</div>
-            <div className="font-semibold text-slate-900">{customer?.name || "—"}</div>
+            <div className="font-semibold text-slate-900">{customer?.name || "â€”"}</div>
             {(customer?.email || customer?.phone || customer?.city) && (
               <div className="text-sm text-slate-600 mt-0.5">
-                {[customer?.email, customer?.phone, customer?.city].filter(Boolean).join(" · ")}
+                {[customer?.email, customer?.phone, customer?.city].filter(Boolean).join(" Â· ")}
               </div>
             )}
           </div>
@@ -535,7 +595,7 @@ function SaleViewer({
               {Number(sale.discount) > 0 && (
                 <div className="flex justify-between">
                   <span className="text-slate-600">Discount</span>
-                  <span className="tabular-nums text-red-600">−{formatMoney(sale.discount, sym)}</span>
+                  <span className="tabular-nums text-red-600">âˆ’{formatMoney(sale.discount, sym)}</span>
                 </div>
               )}
               <div className="flex justify-between">
@@ -593,10 +653,10 @@ function SaleViewer({
 }
 
 /* ========================================================================== */
-/* SALE EDITOR — QuickBooks/Sage-style invoice form                           */
+/* SALE EDITOR â€” QuickBooks/Sage-style invoice form                           */
 /* ========================================================================== */
 function SaleEditor({
-  sale, customers, products, settings, onClose, onCashSuccess,
+  sale, customers, products, settings, onClose, onCashSuccess, initialCustomerId,
 }: {
   sale: Sale | null;
   customers: Customer[];
@@ -604,6 +664,7 @@ function SaleEditor({
   settings: SettingsData;
   onClose: () => void;
   onCashSuccess: (r: SaleReceipt) => void;
+  initialCustomerId?: string;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -613,10 +674,13 @@ function SaleEditor({
   const [discount, setDiscount] = useState(Number(sale?.discount ?? 0));
   const [taxRate, setTaxRate] = useState(Number(sale?.tax_rate ?? settings.tax?.defaultRate ?? 0));
   const [saleType, setSaleType] = useState<SaleType>(sale?.sale_type || "cash");
-  const [customerId, setCustomerId] = useState<string>(sale?.customer_id || "");
+  const [customerId, setCustomerId] = useState<string>(sale?.customer_id || initialCustomerId || "");
   // Cash payment state: tendered defaults to total and stays in sync until user edits it
   const [tendered, setTendered] = useState<number>(0);
   const [tenderedTouched, setTenderedTouched] = useState(false);
+  // Remount key for the "search to add" box so it clears after each pick.
+  const [addKey, setAddKey] = useState(0);
+  const [scanValue, setScanValue] = useState("");
 
   // Inclusive vs exclusive: settings.tax.inclusive controls whether the line
   // prices already include tax (back out) or have tax added on top.
@@ -645,11 +709,12 @@ function SaleEditor({
 
   const isNewCash = saleType === "cash" && !sale;
   const change = Math.max(0, Math.round((tendered - totals.total) * 100) / 100);
-  // Paying less than the total is allowed — the rest becomes a balance (AR).
+  // Paying less than the total is allowed â€” the rest becomes a balance (AR).
   const partial = isNewCash && tendered < totals.total - 0.01;
   const balance = partial ? Math.round((totals.total - tendered) * 100) / 100 : 0;
   const taxName = settings.tax?.name || "Tax";
   const selectedCustomer = customers.find((c) => c.id === customerId);
+  const showCustomerCredit = settings.sales?.showCustomerCredit !== false;
 
   // --- Blockers: serial units not picked, or credit over the limit ----------
   const serialIncompleteLine = lines.find((l) => {
@@ -706,6 +771,57 @@ function SaleEditor({
     setLines(next);
   }
 
+  /** Classic "search to add": append the product (or +1 qty if already on the
+   *  bill), then clear the search box for the next item. */
+  function addProductById(productId: string) {
+    if (!productId) return;
+    const product = products.find((p) => p.id === productId);
+    if (!product) return;
+    const dup = lines.findIndex((l) => l.refId === productId);
+    if (dup >= 0) {
+      const next = [...lines];
+      next[dup] = { ...next[dup], qty: Number(next[dup].qty) + 1 };
+      setLines(next);
+      toast.info(`+1 ${product.name}`);
+    } else {
+      setLines([...lines, { refId: product.id, name: product.name, qty: 1, price: Number(product.selling_price) }]);
+    }
+    setAddKey((k) => k + 1);
+  }
+
+  function setQty(index: number, qty: number) {
+    const next = [...lines];
+    next[index] = { ...next[index], qty: Math.max(0, qty) };
+    setLines(next);
+  }
+
+  /** Barcode scan: match by barcode â†’ code â†’ sku and add the product. Scanners
+   *  send the code followed by Enter, so this fires on Enter and keeps focus. */
+  function handleScan() {
+    const code = scanValue.trim();
+    if (!code) return;
+    const lc = code.toLowerCase();
+    const found = products.find(
+      (p) =>
+        (p.barcode && p.barcode.toLowerCase() === lc) ||
+        (p.code && p.code.toLowerCase() === lc) ||
+        (p.sku && p.sku.toLowerCase() === lc),
+    );
+    if (!found) { toast.error(`No product matches "${code}"`); setScanValue(""); return; }
+    addProductById(found.id);
+    setScanValue("");
+  }
+
+  // One-tap chips for the most relevant products (active, in stock first).
+  const quickAddProducts = useMemo(
+    () =>
+      [...products]
+        .filter((p) => p.status === "active")
+        .sort((a, b) => Number(b.current_stock > 0) - Number(a.current_stock > 0))
+        .slice(0, 14),
+    [products],
+  );
+
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const filled = lines.filter((l) => l.refId);
@@ -740,7 +856,7 @@ function SaleEditor({
   const productOptions: ComboboxOption[] = products.map((p) => ({
     value: p.id,
     label: p.name,
-    sub: `${p.code} · Stock: ${p.current_stock} · ${formatMoney(p.selling_price, sym)}`,
+    sub: `${p.code} Â· Stock: ${p.current_stock} Â· ${formatMoney(p.selling_price, sym)}`,
   }));
 
   const customerOptions: ComboboxOption[] = customers.map((c) => ({
@@ -804,6 +920,24 @@ function SaleEditor({
                           </span>
                         )}
                       </div>
+                      {showCustomerCredit && (
+                        <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+                          <div className="rounded-md bg-white/70 border border-blue-100 px-2 py-1">
+                            <div className="text-[10px] uppercase tracking-wide text-slate-500">Balance owed</div>
+                            <div className={`text-sm font-semibold tabular-nums ${creditOutstanding > 0 ? "text-amber-700" : "text-slate-800"}`}>{formatMoney(creditOutstanding, sym)}</div>
+                          </div>
+                          <div className="rounded-md bg-white/70 border border-blue-100 px-2 py-1">
+                            <div className="text-[10px] uppercase tracking-wide text-slate-500">Credit limit</div>
+                            <div className="text-sm font-semibold tabular-nums text-slate-800">{creditLimit > 0 ? formatMoney(creditLimit, sym) : "â€”"}</div>
+                          </div>
+                          <div className="rounded-md bg-white/70 border border-blue-100 px-2 py-1">
+                            <div className="text-[10px] uppercase tracking-wide text-slate-500">Available</div>
+                            <div className={`text-sm font-semibold tabular-nums ${creditLimit > 0 && creditLimit - creditOutstanding <= 0 ? "text-red-600" : "text-emerald-700"}`}>
+                              {creditLimit > 0 ? formatMoney(Math.max(0, creditLimit - creditOutstanding), sym) : "â€”"}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -853,15 +987,59 @@ function SaleEditor({
           <section>
             <div className="flex items-center justify-between mb-2">
               <SectionTitle className="m-0">Items</SectionTitle>
-              {lines.length > 0 && (
-                <Button type="button" size="sm" variant="outline" onClick={() => addLineAfter(lines.length - 1)}>
-                  <Plus className="h-3.5 w-3.5" /> Add line
-                </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => addLineAfter(lines.length - 1)}>
+                <Plus className="h-3.5 w-3.5" /> Blank line
+              </Button>
+            </div>
+
+            {/* Fast selection: search to add, scan a barcode, or tap a chip. */}
+            <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50/40 p-3">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="flex-1 min-w-0">
+                  <Combobox
+                    key={addKey}
+                    value=""
+                    onChange={addProductById}
+                    options={productOptions}
+                    placeholder="ðŸ”  Search a product by name or code, then press Enter to add itâ€¦"
+                    emptyText="No products match"
+                  />
+                </div>
+                <div className="relative w-full sm:w-56">
+                  <ScanLine className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <Input
+                    value={scanValue}
+                    onChange={(e) => setScanValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleScan(); } }}
+                    placeholder="Scan barcodeâ€¦"
+                    className="pl-8"
+                    aria-label="Scan barcode to add"
+                  />
+                </div>
+              </div>
+              {quickAddProducts.length > 0 && (
+                <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1">
+                  {quickAddProducts.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => addProductById(p.id)}
+                      disabled={p.current_stock <= 0}
+                      title={p.current_stock <= 0 ? "Out of stock" : `Add ${p.name}`}
+                      className="group shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs shadow-sm transition-colors hover:border-blue-400 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <span className="font-medium text-slate-800 group-hover:text-blue-700">{p.name}</span>
+                      <span className="ml-1.5 text-slate-400 tabular-nums">{formatMoney(p.selling_price, sym)}</span>
+                      <span className={`ml-1.5 text-[10px] tabular-nums ${p.current_stock <= 0 ? "text-red-500" : "text-slate-400"}`}>Â· stk {p.current_stock}</span>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
+
             <div className="border rounded-lg overflow-hidden bg-white">
               {/* Column headers */}
-              <div className="grid grid-cols-[36px_minmax(0,1fr)_90px_120px_120px_36px] gap-2 px-3 py-2 bg-slate-100 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+              <div className="grid grid-cols-[36px_minmax(0,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 bg-slate-100 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
                 <div className="text-center">#</div>
                 <div>Product / Service</div>
                 <div className="text-right">Qty</div>
@@ -885,24 +1063,49 @@ function SaleEditor({
                   const picked = l.unit_ids?.length ?? 0;
                   return (
                   <div key={i} className="border-t bg-white hover:bg-slate-50">
-                    <div className="grid grid-cols-[36px_minmax(0,1fr)_90px_120px_120px_36px] gap-2 px-3 py-2 items-center">
+                    <div className="grid grid-cols-[36px_minmax(0,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 items-center">
                     <div className="text-center text-xs text-slate-400 font-medium">{i + 1}</div>
-                    <Combobox
-                      value={l.refId}
-                      onChange={(v) => pickProduct(i, v)}
-                      options={productOptions}
-                      placeholder="Search product..."
-                    />
-                    <Input
-                      className="h-9 text-right tabular-nums"
-                      type="number" step="0.01" min="0"
-                      value={l.qty}
-                      readOnly={serial}
-                      title={serial ? "Quantity is set by the serial units you select" : undefined}
-                      onChange={(e) => {
-                        const next = [...lines]; next[i] = { ...next[i], qty: Number(e.target.value) || 0 }; setLines(next);
-                      }}
-                    />
+                    <div className="min-w-0">
+                      <Combobox
+                        value={l.refId}
+                        onChange={(v) => pickProduct(i, v)}
+                        options={productOptions}
+                        placeholder="Search product..."
+                      />
+                      {prod && (
+                        <div className="mt-0.5 text-[11px] tabular-nums">
+                          <span className={
+                            prod.current_stock <= 0 ? "text-red-600 font-medium"
+                            : Number(l.qty) > prod.current_stock ? "text-amber-600 font-medium"
+                            : "text-slate-400"
+                          }>
+                            {prod.code} Â· Stock: {prod.current_stock}
+                            {prod.current_stock <= 0 ? " â€” out of stock"
+                              : Number(l.qty) > prod.current_stock ? " â€” exceeds stock" : ""}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button" disabled={serial}
+                        onClick={() => setQty(i, Number(l.qty) - 1)}
+                        className="h-8 w-7 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        title="Decrease"
+                      >âˆ’</button>
+                      <LineQtyInput
+                        value={Number(l.qty)}
+                        readOnly={serial}
+                        title={serial ? "Quantity is set by the serial units you select" : undefined}
+                        onCommit={(n) => setQty(i, n)}
+                      />
+                      <button
+                        type="button" disabled={serial}
+                        onClick={() => setQty(i, Number(l.qty) + 1)}
+                        className="h-8 w-7 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        title="Increase"
+                      >+</button>
+                    </div>
                     <Input
                       className="h-9 text-right tabular-nums"
                       type="number" step="0.01" min="0"
@@ -1117,7 +1320,7 @@ function SerialPickDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Select serial units — {product.name}</DialogTitle>
+          <DialogTitle>Select serial units â€” {product.name}</DialogTitle>
           <DialogDescription>Pick which serial-numbered units are being sold. Selected: {selected.length}</DialogDescription>
         </DialogHeader>
         <Input autoFocus value={search} onChange={(e) => setSearch(e.target.value)}
@@ -1125,7 +1328,7 @@ function SerialPickDialog({
         <div className="max-h-[360px] overflow-y-auto border rounded-md mt-2">
           {loading ? (
             <div className="p-6 text-center text-sm text-slate-500">
-              <Loader2 className="h-5 w-5 animate-spin mx-auto mb-1" /> Loading units…
+              <Loader2 className="h-5 w-5 animate-spin mx-auto mb-1" /> Loading unitsâ€¦
             </div>
           ) : units.length === 0 ? (
             <div className="p-6 text-center text-sm text-slate-500">No matching units in stock.</div>
@@ -1162,7 +1365,7 @@ function SectionTitle({ children, className }: { children: React.ReactNode; clas
 }
 
 /* ========================================================================== */
-/* RECEIPT DIALOG — shown after a successful cash sale; supports print        */
+/* RECEIPT DIALOG â€” shown after a successful cash sale; supports print        */
 /* ========================================================================== */
 function SaleReceiptDialog({
   r, settings, onClose,
@@ -1185,7 +1388,7 @@ function SaleReceiptDialog({
   function printReceipt() {
     if (typeof window === "undefined") return;
     const win = window.open("", "_blank", "width=320,height=600");
-    if (!win) { toast.error("Pop-up blocked — please allow pop-ups to print"); return; }
+    if (!win) { toast.error("Pop-up blocked â€” please allow pop-ups to print"); return; }
     const html = `<!doctype html><html><head><title>${escapeHtml(r.invoice_no)}</title>
       <style>
         body { font-family: ui-monospace, monospace; font-size: 12px; padding: 8px; }
@@ -1281,4 +1484,102 @@ function escapeHtml(s: string): string {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   };
   return s.replace(/[&<>"']/g, (c) => map[c] || c);
+}
+
+/** Quantity cell that holds its own text while typing (so you can type "1.5"
+ *  without the decimal point being dropped), and commits valid numbers up. */
+function LineQtyInput({
+  value, readOnly, title, onCommit,
+}: {
+  value: number; readOnly?: boolean; title?: string; onCommit: (n: number) => void;
+}) {
+  const [str, setStr] = useState(String(value));
+  useEffect(() => { setStr(String(value)); }, [value]);
+  return (
+    <Input
+      className="h-9 w-full text-center tabular-nums px-1"
+      type="number" step="0.01" min="0"
+      readOnly={readOnly}
+      title={title}
+      value={str}
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => {
+        setStr(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value !== "" && !Number.isNaN(n)) onCommit(n);
+      }}
+      onBlur={() => { if (str === "" || Number.isNaN(Number(str))) { setStr(String(value)); onCommit(value); } }}
+    />
+  );
+}
+
+/** Open a printable, full-page A4 invoice for a sale (header, bill-to, lines, totals). */
+function printSaleInvoice(sale: Sale, customer: Customer | undefined, settings: SettingsData) {
+  if (typeof window === "undefined") return;
+  const sym = currencySymbol(settings);
+  const win = window.open("", "_blank", "width=820,height=920");
+  if (!win) { toast.error("Pop-up blocked â€” allow pop-ups to print the invoice"); return; }
+  const m = (v: number) => escapeHtml(formatMoney(v, sym));
+  const company = settings.company?.name || "Invoice";
+  const balance = Math.max(0, Number(sale.total) - Number(sale.amount_paid || 0));
+  const taxName = settings.tax?.name || "Tax";
+  const rows = (sale.items || []).map((l, i) => `
+    <tr>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;color:#64748b">${i + 1}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtml(l.name)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${l.qty}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${m(l.price)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${m(Number(l.qty) * Number(l.price))}</td>
+    </tr>`).join("");
+  const html = `<!doctype html><html><head><title>Invoice ${escapeHtml(sale.invoice_no)}</title>
+    <style>
+      *{box-sizing:border-box} body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;color:#0f172a;padding:32px;max-width:780px;margin:0 auto}
+      .top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+      .brand{font-size:20px;font-weight:700}
+      .muted{color:#64748b;font-size:12px}
+      .title{font-size:24px;font-weight:700;letter-spacing:.02em;color:#1d4ed8}
+      table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13px}
+      th{background:#f1f5f9;color:#475569;text-transform:uppercase;font-size:11px;letter-spacing:.04em;padding:8px;text-align:left}
+      th.r,td.r{text-align:right}
+      .totals{margin-top:16px;margin-left:auto;width:280px;font-size:13px}
+      .totals .row{display:flex;justify-content:space-between;padding:4px 0}
+      .totals .grand{border-top:2px solid #0f172a;margin-top:6px;padding-top:8px;font-weight:700;font-size:15px}
+      .pill{display:inline-block;padding:2px 10px;border-radius:9999px;font-size:11px;font-weight:600}
+      .footer{margin-top:40px;color:#64748b;font-size:12px;border-top:1px solid #eee;padding-top:10px}
+    </style></head><body>
+    <div class="top">
+      <div>
+        <div class="brand">${escapeHtml(company)}</div>
+        ${settings.company?.address ? `<div class="muted">${escapeHtml(settings.company.address)}</div>` : ""}
+        ${settings.company?.phone ? `<div class="muted">Tel: ${escapeHtml(settings.company.phone)}</div>` : ""}
+        ${settings.tax?.registrationNo ? `<div class="muted">${escapeHtml(taxName)} No: ${escapeHtml(settings.tax.registrationNo)}</div>` : ""}
+      </div>
+      <div style="text-align:right">
+        <div class="title">INVOICE</div>
+        <div class="muted" style="margin-top:4px">${escapeHtml(sale.invoice_no)}</div>
+        <div class="muted">${new Date(sale.date).toLocaleDateString()}</div>
+        <div style="margin-top:6px"><span class="pill" style="background:${balance <= 0.001 ? "#dcfce7;color:#15803d" : "#fef3c7;color:#92400e"}">${balance <= 0.001 ? "PAID" : "BALANCE " + m(balance)}</span></div>
+      </div>
+    </div>
+    <div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.06em">Bill to</div>
+    <div style="font-weight:600;font-size:15px">${escapeHtml(customer?.name || "Walk-in customer")}</div>
+    ${customer?.email ? `<div class="muted">${escapeHtml(customer.email)}</div>` : ""}
+    ${customer?.phone ? `<div class="muted">${escapeHtml(customer.phone)}</div>` : ""}
+    <table>
+      <thead><tr><th style="width:32px">#</th><th>Item</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Amount</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="totals">
+      <div class="row"><span class="muted">Subtotal</span><span>${m(Number(sale.subtotal))}</span></div>
+      ${Number(sale.discount) > 0 ? `<div class="row"><span class="muted">Discount</span><span>-${m(Number(sale.discount))}</span></div>` : ""}
+      ${Number(sale.tax) > 0 ? `<div class="row"><span class="muted">${escapeHtml(taxName)} (${sale.tax_rate}%)</span><span>${m(Number(sale.tax))}</span></div>` : ""}
+      <div class="row grand"><span>Total</span><span>${m(Number(sale.total))}</span></div>
+      ${Number(sale.amount_paid) > 0 ? `<div class="row"><span class="muted">Paid</span><span>${m(Number(sale.amount_paid))}</span></div>` : ""}
+      ${balance > 0.001 ? `<div class="row" style="font-weight:600"><span>Balance due</span><span>${m(balance)}</span></div>` : ""}
+    </div>
+    <div class="footer">${escapeHtml(settings.receipt?.footer || "Thank you for your business!")}</div>
+    <script>window.onload = () => { window.print(); };</script>
+    </body></html>`;
+  win.document.write(html);
+  win.document.close();
 }
