@@ -19,7 +19,10 @@ import { PageHeader } from "@/components/page-header";
 import type { PaymentMethod, PaymentMethodKind, BankAccount } from "@/lib/types";
 import type { PermissionMatrix } from "@/lib/permissions";
 import { can } from "@/lib/permissions";
+import { formatMoney } from "@/lib/utils";
 import { createPaymentMethod, updatePaymentMethod, deletePaymentMethod } from "./actions";
+
+type AssetAccount = { id: string; code: string; name: string; type: string };
 
 const KIND_ICON: Record<PaymentMethodKind, React.ElementType> = {
   cash: Banknote, mpesa: Smartphone, bank: Building2, card: CreditCard, other: MoreHorizontal,
@@ -32,17 +35,20 @@ const KIND_COLOR: Record<PaymentMethodKind, "success" | "warning" | "info" | "se
 };
 
 export function PaymentMethodsClient({
-  methods, bankAccounts, permissions,
+  methods, bankAccounts, assetAccounts, balanceByMethod, permissions,
 }: {
   methods: PaymentMethod[];
   bankAccounts: BankAccount[];
+  assetAccounts: AssetAccount[];
+  balanceByMethod: Record<string, number>;
   permissions: PermissionMatrix;
 }) {
   const [editing, setEditing] = useState<PaymentMethod | null>(null);
   const [adding, setAdding] = useState(false);
+  const acctById = new Map(assetAccounts.map((a) => [a.id, a]));
 
   const columns: Column<PaymentMethod>[] = [
-    { key: "name", label: "Name", className: "font-medium",
+    { key: "name", label: "Account", className: "font-medium",
       render: (r) => {
         const Icon = KIND_ICON[r.kind] || MoreHorizontal;
         return (
@@ -52,21 +58,24 @@ export function PaymentMethodsClient({
           </span>
         );
       } },
-    { key: "kind", label: "Type", className: "w-[110px]",
+    { key: "kind", label: "Type", className: "w-[100px]",
       render: (r) => <Badge variant={KIND_COLOR[r.kind] || "secondary"}>{KIND_LABEL[r.kind]}</Badge> },
-    { key: "bank_account_id", label: "Bank Account", render: (r) => {
-      const ba = bankAccounts.find((b) => b.id === r.bank_account_id);
-      return ba ? ba.name : <span className="text-muted-foreground">—</span>;
+    { key: "account_id", label: "Ledger account", render: (r) => {
+      const a = r.account_id ? acctById.get(r.account_id) : undefined;
+      return a ? <span className="font-mono text-xs">{a.code} · {a.name}</span> : <span className="text-amber-600 text-xs">⚠ not linked</span>;
     }},
-    { key: "requires_ref", label: "Reference", className: "w-[110px]",
-      render: (r) => r.requires_ref ? <Badge variant="info">Required</Badge> : <span className="text-muted-foreground text-xs">Optional</span> },
-    { key: "is_active", label: "Status", className: "w-[100px]",
+    { key: "balance" as keyof PaymentMethod, label: "Balance", className: "w-[140px] text-right",
+      render: (r) => {
+        const bal = balanceByMethod[r.id] ?? 0;
+        return <span className={`tabular-nums font-medium ${bal < 0 ? "text-red-600" : "text-slate-900"}`}>{formatMoney(bal)}</span>;
+      } },
+    { key: "is_active", label: "Status", className: "w-[90px]",
       render: (r) => <Badge variant={r.is_active ? "success" : "secondary"}>{r.is_active ? "Active" : "Inactive"}</Badge> },
   ];
 
   return (
     <div>
-      <PageHeader title="Payment Methods" description="Cash, M-Pesa (PayBill / Till), bank, card, and custom methods">
+      <PageHeader title="Cash & Bank Accounts" description="Every place your money sits — cash tills, bank accounts, M-Pesa wallets — each tied to one ledger account.">
         {can(permissions, "accounting", "create") && (
           <Button size="sm" onClick={() => setAdding(true)}>
             <Plus className="h-4 w-4" /> New Method
@@ -94,7 +103,7 @@ export function PaymentMethodsClient({
       />
 
       {(adding || editing) && (
-        <PaymentMethodDialog method={editing} bankAccounts={bankAccounts}
+        <PaymentMethodDialog method={editing} bankAccounts={bankAccounts} assetAccounts={assetAccounts}
           onClose={() => { setAdding(false); setEditing(null); }} />
       )}
     </div>
@@ -102,15 +111,19 @@ export function PaymentMethodsClient({
 }
 
 function PaymentMethodDialog({
-  method, bankAccounts, onClose,
+  method, bankAccounts, assetAccounts, onClose,
 }: {
   method: PaymentMethod | null;
   bankAccounts: BankAccount[];
+  assetAccounts: AssetAccount[];
   onClose: () => void;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
+  const codeFor = (k: PaymentMethodKind) => (k === "mpesa" ? "1110" : k === "bank" || k === "card" ? "1100" : "1010");
+  const suggestId = (k: PaymentMethodKind) => assetAccounts.find((a) => a.code === codeFor(k))?.id ?? "";
   const [kind, setKind] = useState<PaymentMethodKind>(method?.kind || "cash");
+  const [accountId, setAccountId] = useState<string>(method?.account_id ?? suggestId(method?.kind || "cash"));
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -137,7 +150,12 @@ function PaymentMethodDialog({
           </div>
           <div className="col-span-5">
             <Label htmlFor="kind">Type *</Label>
-            <Select id="kind" name="kind" value={kind} onChange={(e) => setKind(e.target.value as PaymentMethodKind)} required>
+            <Select id="kind" name="kind" value={kind} onChange={(e) => {
+              const k = e.target.value as PaymentMethodKind;
+              // If the account still matches the old suggestion, move it to the new one.
+              if (!accountId || accountId === suggestId(kind)) setAccountId(suggestId(k));
+              setKind(k);
+            }} required>
               <option value="cash">Cash</option>
               <option value="mpesa">M-Pesa</option>
               <option value="bank">Bank</option>
@@ -146,17 +164,19 @@ function PaymentMethodDialog({
             </Select>
           </div>
           <div className="col-span-12">
-            <Label htmlFor="bank_account_id">Bank Account (where funds land)</Label>
-            <Select id="bank_account_id" name="bank_account_id" defaultValue={method?.bank_account_id ?? ""}>
-              <option value="">— None / Auto —</option>
-              {bankAccounts.map((b) => (
-                <option key={b.id} value={b.id}>{b.name}{b.bank_name ? ` — ${b.bank_name}` : ""}</option>
+            <Label htmlFor="account_id">Ledger account (where the money sits) *</Label>
+            <Select id="account_id" name="account_id" value={accountId} onChange={(e) => setAccountId(e.target.value)} required>
+              <option value="">— Select an asset account —</option>
+              {assetAccounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.code} · {a.name}</option>
               ))}
             </Select>
             <p className="text-xs text-muted-foreground mt-1">
-              Optional. If unset, defaults to the standard chart-of-accounts asset for this kind.
+              Every payment in/out of this method posts to this account, so its balance is your real cash/bank position.
+              Tip: create a <b>separate</b> account for each real till or bank so balances never get mixed up.
             </p>
           </div>
+          <input type="hidden" name="bank_account_id" value={method?.bank_account_id ?? ""} />
           {kind === "mpesa" && (
             <>
               <div className="col-span-7">

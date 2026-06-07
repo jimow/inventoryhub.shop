@@ -50,6 +50,16 @@ export async function createLoan(formData: FormData): Promise<Result> {
     const payment_method_id = (String(formData.get("payment_method_id") || "") || null) as string | null;
     const notes = String(formData.get("notes") || "").trim() || null;
 
+    // The money must go somewhere visible & spendable — require an explicit account.
+    if (!payment_method_id) {
+      return {
+        ok: false,
+        error: direction === "payable"
+          ? "Choose the cash/bank account to deposit the borrowed funds into."
+          : "Choose the cash/bank account the loaned-out money is paid from.",
+      };
+    }
+
     const admin = createServiceClient();
     await ensureChartOfAccounts(admin);
 
@@ -109,6 +119,8 @@ export async function recordLoanPayment(formData: FormData): Promise<Result> {
     const date = String(formData.get("date") || new Date().toISOString().slice(0, 10));
     const payment_method_id = (String(formData.get("payment_method_id") || "") || null) as string | null;
     const notes = String(formData.get("notes") || "").trim() || null;
+
+    if (!payment_method_id) return { ok: false, error: "Choose the cash/bank account for this payment." };
 
     const admin = createServiceClient();
     await ensureChartOfAccounts(admin);

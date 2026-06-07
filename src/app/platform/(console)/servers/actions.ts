@@ -1,9 +1,11 @@
 "use server";
 
+import fs from "node:fs";
+import path from "node:path";
 import { revalidatePath } from "next/cache";
 import { createPlatformClient, getPlatformSession, logPlatformAction } from "@/lib/platform";
 import { encryptSecret } from "@/lib/crypto";
-import { testServer, runDeploy, type DeployConfig, type ServerConn } from "@/lib/ssh";
+import { testServer, runDeploy, diagnoseServer, restartApp, runServerOp, type DeployConfig, type ServerConn } from "@/lib/ssh";
 
 export type ActionResult = { ok: boolean; error?: string };
 export type TestResult = ActionResult & { info?: string };
@@ -22,7 +24,14 @@ export async function saveServer(formData: FormData, id?: string): Promise<Actio
   const host = s(formData, "host");
   if (!name || !host) return { ok: false, error: "Name and host are required." };
 
+  // Public host = "<subdomain>.<base_domain>" (or just the base domain).
+  const subdomain = s(formData, "subdomain").toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const baseDomain = s(formData, "base_domain").toLowerCase().replace(/[^a-z0-9.-]/g, "");
+  const composedDomain = baseDomain ? (subdomain ? `${subdomain}.${baseDomain}` : baseDomain) : "";
+
   const patch: Record<string, unknown> = {
+    subdomain: subdomain || null,
+    base_domain: baseDomain || null,
     name,
     host,
     port: Number(s(formData, "port")) || 22,
@@ -33,6 +42,10 @@ export async function saveServer(formData: FormData, id?: string): Promise<Actio
     branch: s(formData, "branch") || "main",
     app_port: Number(s(formData, "app_port")) || 3000,
     base_url: s(formData, "base_url") || null,
+    domain: composedDomain || null,
+    ssl_email: s(formData, "ssl_email") || null,
+    setup_ssl: formData.get("setup_ssl") != null,
+    www_alias: formData.get("www_alias") != null,
   };
   const secret = String(formData.get("secret") || "");
   if (secret) patch.secret_cipher = encryptSecret(secret);
@@ -87,11 +100,60 @@ export async function testServerConnection(id: string): Promise<TestResult> {
   return result.ok ? { ok: true, info: result.info } : { ok: false, error: result.error };
 }
 
-/** Kick off a deployment of a workspace to a server. Runs asynchronously. */
+/** Live health report (pm2, app port, nginx, logs). */
+export async function diagnoseServerAction(id: string): Promise<TestResult> {
+  const session = await getPlatformSession();
+  if (!session) return { ok: false, error: "Not authorized." };
+  const admin = createPlatformClient();
+  const { data: server } = await admin.from("platform_servers").select("*").eq("id", id).maybeSingle();
+  if (!server) return { ok: false, error: "Server not found." };
+  const conn: ServerConn = {
+    host: server.host, port: server.port, ssh_user: server.ssh_user,
+    auth_method: server.auth_method, secret_cipher: server.secret_cipher,
+  };
+  const r = await diagnoseServer(conn, { appPort: server.app_port, domain: server.domain });
+  return r.ok ? { ok: true, info: r.info } : { ok: false, error: r.error };
+}
+
+/** Restart the app's pm2 process(es) on the server. */
+export async function restartServerApp(id: string): Promise<TestResult> {
+  const session = await getPlatformSession();
+  if (!session) return { ok: false, error: "Not authorized." };
+  const admin = createPlatformClient();
+  const { data: server } = await admin.from("platform_servers").select("*").eq("id", id).maybeSingle();
+  if (!server) return { ok: false, error: "Server not found." };
+  const conn: ServerConn = {
+    host: server.host, port: server.port, ssh_user: server.ssh_user,
+    auth_method: server.auth_method, secret_cipher: server.secret_cipher,
+  };
+  const r = await restartApp(conn);
+  await logPlatformAction({ action: "server.app_restarted", detail: { name: server.name } });
+  return r.ok ? { ok: true, info: r.info } : { ok: false, error: r.error };
+}
+
+/** Run a named one-click operation (pm2/nginx/ssl/system) on a server. */
+export async function runServerOperation(id: string, opKey: string): Promise<TestResult> {
+  const session = await getPlatformSession();
+  if (!session) return { ok: false, error: "Not authorized." };
+  const admin = createPlatformClient();
+  const { data: server } = await admin.from("platform_servers").select("*").eq("id", id).maybeSingle();
+  if (!server) return { ok: false, error: "Server not found." };
+  const conn: ServerConn = {
+    host: server.host, port: server.port, ssh_user: server.ssh_user,
+    auth_method: server.auth_method, secret_cipher: server.secret_cipher,
+  };
+  const r = await runServerOp(conn, opKey, { appPort: server.app_port, domain: server.domain, appDir: server.app_dir });
+  await logPlatformAction({ action: `server.op.${opKey}`, tenantName: null, detail: { server: server.name } });
+  return r.ok ? { ok: true, info: r.info } : { ok: false, error: r.error };
+}
+
+/** Deploy a clean (uninstalled) app to a server. The operator installs/names
+ *  the shop on first visit at /install. Runs asynchronously. */
 export async function startDeployment(
   serverId: string,
-  tenantId: string,
-  appPortOverride?: number
+  appPortOverride?: number,
+  sourceMode?: "upload" | "repo",
+  localFolder?: string
 ): Promise<DeployStart> {
   const session = await getPlatformSession();
   if (!session) return { ok: false, error: "Not authorized." };
@@ -99,8 +161,25 @@ export async function startDeployment(
   const admin = createPlatformClient();
   const { data: server } = await admin.from("platform_servers").select("*").eq("id", serverId).maybeSingle();
   if (!server) return { ok: false, error: "Server not found." };
-  const { data: tenant } = await admin.from("tenants").select("name, slug").eq("id", tenantId).maybeSingle();
-  if (!tenant) return { ok: false, error: "Workspace not found." };
+
+  const useRepo = sourceMode === "repo" && !!server.repo_url;
+
+  // Resolve which local folder to upload (only relevant for the upload path).
+  let localRoot = process.cwd();
+  if (!useRepo && localFolder && localFolder.trim()) {
+    const p = path.resolve(localFolder.trim());
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(p);
+    } catch {
+      return { ok: false, error: `Source folder not found on the console host: ${p}` };
+    }
+    if (!st.isDirectory()) return { ok: false, error: "Source folder is not a directory." };
+    if (!fs.existsSync(path.join(p, "package.json"))) {
+      return { ok: false, error: "That folder has no package.json — it doesn't look like the app." };
+    }
+    localRoot = p;
+  }
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -111,28 +190,43 @@ export async function startDeployment(
 
   const { data: dep, error: insErr } = await admin.from("platform_deployments").insert({
     server_id: serverId, server_name: server.name,
-    tenant_id: tenantId, tenant_name: tenant.name,
+    tenant_id: null, tenant_name: "Set up on first visit (/install)",
     status: "running", step: "starting", app_port: appPort, created_by: session.userId,
   }).select("id").single();
   if (insErr || !dep) return { ok: false, error: insErr?.message || "Could not create deployment." };
   const depId = dep.id as string;
 
+  const domain = (server.domain || "").trim();
+  const useSsl = domain ? !!server.setup_ssl && !!server.ssl_email : false;
+  const baseUrl = domain
+    ? `${useSsl ? "https" : "http"}://${domain}`
+    : server.base_url || `http://${server.host}:${appPort}`;
+
   const cfg: DeployConfig = {
     appDir: server.app_dir, repoUrl: server.repo_url, branch: server.branch, appPort,
-    tenantId, slug: tenant.slug || tenant.name,
     supabaseUrl: url, supabaseAnon: anon, supabaseService: svc,
+    // Upload a local app folder over SFTP unless git is explicitly chosen.
+    source: useRepo ? "repo" : "upload",
+    localRoot,
+    domain: domain || null,
+    sslEmail: server.ssl_email || null,
+    setupSsl: !!server.setup_ssl,
+    wwwAlias: !!server.www_alias,
   };
   const conn: ServerConn = {
     host: server.host, port: server.port, ssh_user: server.ssh_user,
     auth_method: server.auth_method, secret_cipher: server.secret_cipher,
   };
 
+  // Persist the resolved public URL on the deployment row.
+  await admin.from("platform_deployments").update({ base_url: baseUrl }).eq("id", depId);
+
   // Fire-and-forget: streams the log into the deployment row as it runs.
-  void runDeploymentJob(depId, conn, cfg, { id: serverId, base_url: server.base_url });
+  void runDeploymentJob(depId, conn, cfg, { id: serverId, base_url: baseUrl });
 
   await logPlatformAction({
-    action: "deploy.started", tenantId, tenantName: tenant.name,
-    detail: { server: server.name, port: appPort },
+    action: "deploy.started",
+    detail: { server: server.name, port: appPort, domain: domain || null },
   });
   return { ok: true, deploymentId: depId };
 }

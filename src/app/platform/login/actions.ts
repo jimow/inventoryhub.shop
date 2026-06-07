@@ -4,12 +4,16 @@ import {
   createPlatformAuthClient,
   createPlatformClient,
   isPlatformAdmin,
+  isPlatformConsoleEnabled,
 } from "@/lib/platform";
 
 export type PlatformAuthResult = { ok: boolean; error?: string };
 
+const DISABLED: PlatformAuthResult = { ok: false, error: "The platform console is not available on this deployment." };
+
 /** Sign in as a platform super-admin. Verifies Supabase creds AND membership. */
 export async function platformLogin(formData: FormData): Promise<PlatformAuthResult> {
+  if (!isPlatformConsoleEnabled()) return DISABLED;
   const email = String(formData.get("email") || "").trim().toLowerCase();
   const password = String(formData.get("password") || "");
   if (!email || !password) return { ok: false, error: "Email and password are required." };
@@ -41,6 +45,7 @@ export async function platformLogout(): Promise<void> {
  * no auth account yet, one is created.
  */
 export async function platformSetup(formData: FormData): Promise<PlatformAuthResult> {
+  if (!isPlatformConsoleEnabled()) return DISABLED;
   const email = String(formData.get("email") || "").trim().toLowerCase();
   const password = String(formData.get("password") || "");
   const name = String(formData.get("name") || "").trim();

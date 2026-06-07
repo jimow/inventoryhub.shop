@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { requirePermission, getCurrentSession } from "@/lib/auth";
 import { reserveNextNumber, getSettings } from "@/lib/numbering";
-import { postPaymentJournal, postJournal, recomputeSaleStatus, recomputePurchaseStatus, reverseJournalsForSource, assertSufficientFunds } from "@/lib/accounting";
+import { postPaymentJournal, postJournal, recomputeSaleStatus, recomputePurchaseStatus, reverseJournalsForSource, assertSufficientFunds, resolvePaymentMethodAccountCode } from "@/lib/accounting";
 import type { PaymentDirection, PaymentSource } from "@/lib/types";
 
 type Result = { ok: boolean; error?: string };
@@ -179,27 +179,9 @@ export async function recordPayment(input: {
  * cash / bank / mpesa asset that backs a payment method.
  */
 async function assetCodeForMethod(payment_method_id: string): Promise<string> {
+  // Single source of truth — prefers each method's explicitly linked GL account.
   const admin = createServiceClient();
-  const { data: pm } = await admin
-    .from("payment_methods")
-    .select("kind, bank_account_id")
-    .eq("id", payment_method_id)
-    .single();
-  if (!pm) return "1010";
-  if (pm.kind === "cash") return "1010";
-  if (pm.kind === "mpesa") return "1110";
-  if (pm.kind === "card") return "1100";
-  if (pm.kind === "bank") {
-    if (pm.bank_account_id) {
-      const { data: ba } = await admin.from("bank_accounts").select("account_id").eq("id", pm.bank_account_id).single();
-      if (ba?.account_id) {
-        const { data: acc } = await admin.from("accounts").select("code").eq("id", ba.account_id).single();
-        if (acc?.code) return acc.code;
-      }
-    }
-    return "1100";
-  }
-  return "1010";
+  return resolvePaymentMethodAccountCode(admin, payment_method_id);
 }
 
 /**

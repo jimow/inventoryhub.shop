@@ -113,8 +113,8 @@ export default async function TenantDetailPage({ params }: { params: Params }) {
           <Button asChild size="sm" variant="outline">
             <Link href={`/platform/tenants/${tenant.id}/view`}><Eye className="h-4 w-4" /> View data</Link>
           </Button>
-          <Button asChild size="sm">
-            <Link href={`/platform/servers?deploy=${tenant.id}`}><Rocket className="h-4 w-4" /> Deploy</Link>
+          <Button asChild size="sm" variant="outline">
+            <Link href="/platform/servers"><Rocket className="h-4 w-4" /> Servers</Link>
           </Button>
         </div>
       </div>

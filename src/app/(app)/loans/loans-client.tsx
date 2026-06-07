@@ -24,11 +24,12 @@ import { formatMoney, formatDate, currencySymbol } from "@/lib/utils";
 import { createLoan, recordLoanPayment, cancelLoan, cancelLoanPayment } from "./actions";
 
 export function LoansClient({
-  loans, payments, methods, settings, permissions,
+  loans, payments, methods, balanceByMethod, settings, permissions,
 }: {
   loans: Loan[];
   payments: LoanPayment[];
   methods: PaymentMethod[];
+  balanceByMethod: Record<string, number>;
   settings: SettingsData;
   permissions: PermissionMatrix;
 }) {
@@ -151,9 +152,9 @@ export function LoansClient({
         </Table>
       </Card>
 
-      {newLoan && <LoanDialog direction={newLoan} methods={methods} sym={sym} onClose={() => setNewLoan(null)} />}
+      {newLoan && <LoanDialog direction={newLoan} methods={methods} balanceByMethod={balanceByMethod} sym={sym} onClose={() => setNewLoan(null)} />}
       {payFor && (
-        <PaymentDialog loan={payFor} methods={methods} sym={sym}
+        <PaymentDialog loan={payFor} methods={methods} balanceByMethod={balanceByMethod} sym={sym}
           outstanding={Math.max(0, Number(payFor.principal) - (paidPrincipal.get(payFor.id) || 0))}
           onClose={() => setPayFor(null)} />
       )}
@@ -174,8 +175,8 @@ function CancelBtn({ label, onConfirm }: { label: string; onConfirm: () => Promi
   );
 }
 
-function LoanDialog({ direction, methods, sym, onClose }: {
-  direction: LoanDirection; methods: PaymentMethod[]; sym: string; onClose: () => void;
+function LoanDialog({ direction, methods, balanceByMethod, sym, onClose }: {
+  direction: LoanDirection; methods: PaymentMethod[]; balanceByMethod: Record<string, number>; sym: string; onClose: () => void;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -213,9 +214,12 @@ function LoanDialog({ direction, methods, sym, onClose }: {
             <Input id="start_date" name="start_date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></div>
           <div><Label htmlFor="due_date">Due date</Label>
             <Input id="due_date" name="due_date" type="date" /></div>
-          <div className="col-span-2"><Label>{borrow ? "Received into" : "Paid from"}</Label>
-            <Select name="payment_method_id"><option value="">— Cash drawer —</option>
-              {methods.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</Select></div>
+          <div className="col-span-2"><Label>{borrow ? "Deposit borrowed funds into *" : "Pay the loaned-out money from *"}</Label>
+            <Select name="payment_method_id" required defaultValue="">
+              <option value="" disabled>— Select cash/bank account —</option>
+              {methods.map((m) => <option key={m.id} value={m.id}>{m.name}{balanceByMethod[m.id] != null ? ` · ${formatMoney(balanceByMethod[m.id], sym)}` : ""}</option>)}
+            </Select>
+            <p className="text-xs text-slate-500 mt-1">{borrow ? "The money is deposited here and is immediately spendable." : "Funds are paid out of this account."}</p></div>
           <div className="col-span-2"><Label htmlFor="notes">Notes</Label><Input id="notes" name="notes" placeholder="Optional" /></div>
           <DialogFooter className="col-span-2">
             <Button type="button" variant="outline" onClick={onClose} disabled={pending}>Cancel</Button>
@@ -229,8 +233,8 @@ function LoanDialog({ direction, methods, sym, onClose }: {
   );
 }
 
-function PaymentDialog({ loan, methods, sym, outstanding, onClose }: {
-  loan: Loan; methods: PaymentMethod[]; sym: string; outstanding: number; onClose: () => void;
+function PaymentDialog({ loan, methods, balanceByMethod, sym, outstanding, onClose }: {
+  loan: Loan; methods: PaymentMethod[]; balanceByMethod: Record<string, number>; sym: string; outstanding: number; onClose: () => void;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -268,9 +272,11 @@ function PaymentDialog({ loan, methods, sym, outstanding, onClose }: {
             <Input id="interest_portion" name="interest_portion" type="number" step="0.01" min="0" value={interest} onChange={(e) => setInterest(Number(e.target.value) || 0)} /></div>
           <div><Label htmlFor="date">Date</Label>
             <Input id="date" name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></div>
-          <div><Label>{repay ? "Paid from" : "Received into"}</Label>
-            <Select name="payment_method_id"><option value="">— Cash drawer —</option>
-              {methods.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</Select></div>
+          <div><Label>{repay ? "Paid from *" : "Received into *"}</Label>
+            <Select name="payment_method_id" required defaultValue="">
+              <option value="" disabled>— Select cash/bank account —</option>
+              {methods.map((m) => <option key={m.id} value={m.id}>{m.name}{balanceByMethod[m.id] != null ? ` · ${formatMoney(balanceByMethod[m.id], sym)}` : ""}</option>)}
+            </Select></div>
           <div className="col-span-2"><Label htmlFor="notes">Notes</Label><Input id="notes" name="notes" placeholder="Optional" /></div>
           <DialogFooter className="col-span-2 sm:justify-between">
             <span className="text-sm text-slate-600">Total: <b className="tabular-nums">{formatMoney(total, sym)}</b></span>

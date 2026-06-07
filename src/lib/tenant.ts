@@ -29,6 +29,13 @@ export type TenantConfig = {
    */
   boundPath?: string;
   boundHost?: string;
+  /**
+   * Whether THIS deployment is the cross-tenant platform/super-admin console.
+   * Deployed shops set this to false so /platform (and the test module) are not
+   * exposed on a tenant's public URL — which would be a serious security hole
+   * since all shops share one database.
+   */
+  platformConsole?: boolean;
 };
 
 /** This deployment's folder + host signature. */
@@ -108,6 +115,27 @@ export function activeSchema(): string {
   const env = process.env.TENANT_SCHEMA;
   if (env && env.trim()) return env.trim();
   return readConfig()?.schema || "public";
+}
+
+/**
+ * Whether the cross-tenant platform/super-admin console is exposed on THIS
+ * deployment. Resolution order:
+ *   1. PLATFORM_CONSOLE_ENABLED env ("true"/"1" = on, anything else = off)
+ *   2. tenant.config.local.json `platformConsole === false` ⇒ off (set by the
+ *      deploy / install for tenant shops)
+ *   3. default ⇒ on (so the operator's own console keeps working)
+ * Deployed shops are off, so /platform 404s on a tenant's public URL.
+ */
+export function isPlatformConsoleEnabled(): boolean {
+  const env = process.env.PLATFORM_CONSOLE_ENABLED;
+  if (env && env.trim()) return env === "true" || env === "1";
+  try {
+    const cfg = readConfig();
+    if (cfg && cfg.platformConsole === false) return false;
+  } catch {
+    /* fall through to default */
+  }
+  return true;
 }
 
 /** Whether this deployment has been set up. */

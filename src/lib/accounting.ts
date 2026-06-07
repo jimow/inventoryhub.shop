@@ -296,10 +296,15 @@ export async function resolvePaymentMethodAccountCode(
   if (!payment_method_id) return "1010";
   const { data: pm } = await admin
     .from("payment_methods")
-    .select("kind, bank_account_id")
+    .select("kind, bank_account_id, account_id")
     .eq("id", payment_method_id)
     .single();
   if (!pm) return "1010";
+  // Explicit linked GL account is the source of truth.
+  if (pm.account_id) {
+    const { data: acc } = await admin.from("accounts").select("code").eq("id", pm.account_id).single();
+    if (acc?.code) return acc.code as string;
+  }
   if (pm.kind === "cash") return "1010";
   if (pm.kind === "mpesa") return "1110";
   if (pm.kind === "card") return "1100";
@@ -586,8 +591,11 @@ export async function availableFunds(payment_method_id: string | null): Promise<
   if (!payment_method_id) return balanceByCode("1010"); // default cash drawer
 
   const { data: pm } = await admin
-    .from("payment_methods").select("kind, bank_account_id").eq("id", payment_method_id).single();
+    .from("payment_methods").select("kind, bank_account_id, account_id").eq("id", payment_method_id).single();
   if (!pm) return balanceByCode("1010");
+
+  // Explicit linked GL account is the source of truth.
+  if (pm.account_id) return getAccountBalance(pm.account_id as string);
 
   if (pm.kind === "bank" && pm.bank_account_id) {
     const { data: ba } = await admin
@@ -599,6 +607,35 @@ export async function availableFunds(payment_method_id: string | null): Promise<
 
   const code = pm.kind === "cash" ? "1010" : pm.kind === "mpesa" ? "1110" : pm.kind === "card" ? "1100" : "1010";
   return balanceByCode(code);
+}
+
+/**
+ * The named cash/bank/mobile "funds accounts" a user moves money through, each
+ * with its live balance. Backed by active payment methods + their linked GL
+ * account. This is the single list the UI should show for "where is money".
+ */
+export async function fundsAccounts(): Promise<
+  { id: string; name: string; kind: string; code: string | null; balance: number }[]
+> {
+  const admin = createServiceClient();
+  const tid = currentTenantId();
+  let q = admin.from("payment_methods").select("id, name, kind, account_id").eq("is_active", true).order("name");
+  if (tid) q = q.eq("tenant_id", tid);
+  const { data: methods } = await q;
+  const out: { id: string; name: string; kind: string; code: string | null; balance: number }[] = [];
+  for (const m of methods || []) {
+    let code: string | null = null;
+    let balance = 0;
+    if (m.account_id) {
+      const { data: acc } = await admin.from("accounts").select("code").eq("id", m.account_id as string).single();
+      code = (acc?.code as string) ?? null;
+      balance = await getAccountBalance(m.account_id as string);
+    } else {
+      balance = await availableFunds(m.id as string);
+    }
+    out.push({ id: m.id as string, name: m.name as string, kind: m.kind as string, code, balance });
+  }
+  return out;
 }
 
 /** Throwable guard: refuse to move more money than is available. */

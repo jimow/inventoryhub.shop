@@ -12,6 +12,7 @@ import {
   LogOut,
   ServerCog,
   Server,
+  FlaskConical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { platformLogout } from "@/app/platform/login/actions";
@@ -20,6 +21,7 @@ const NAV = [
   { href: "/platform",        label: "Overview",       icon: LayoutDashboard, exact: true },
   { href: "/platform/tenants", label: "Tenants",        icon: Building2 },
   { href: "/platform/servers", label: "Servers",        icon: Server },
+  { href: "/platform/tests",   label: "System Tests",   icon: FlaskConical },
   { href: "/platform/audit",   label: "Audit Log",      icon: ScrollText },
   { href: "/platform/admins",  label: "Platform Admins", icon: ShieldCheck },
 ];

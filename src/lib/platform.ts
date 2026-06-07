@@ -13,6 +13,9 @@ import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 import { TENANT_STATUS_META, type TenantStatus, type TenantOverviewRow } from "@/lib/platform-shared";
+import { isPlatformConsoleEnabled } from "@/lib/tenant";
+
+export { isPlatformConsoleEnabled };
 
 // Re-export the client-safe pieces so existing server-side imports keep working.
 export { TENANT_STATUS_META };
@@ -82,6 +85,9 @@ export async function isPlatformAdmin(userId: string): Promise<boolean> {
 
 /** The current platform-admin session, or null if not signed in as one. */
 export const getPlatformSession = cache(async function _getPlatformSession(): Promise<PlatformSession | null> {
+  // SECURITY: no platform session on deployments where the console is disabled
+  // (tenant shops) — this fails closed for every console server action.
+  if (!isPlatformConsoleEnabled()) return null;
   const supabase = await createAuthClient();
   const {
     data: { user },

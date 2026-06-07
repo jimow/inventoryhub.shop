@@ -376,6 +376,7 @@ export type PaymentMethod = {
   name: string;
   kind: PaymentMethodKind;
   bank_account_id: string | null;
+  account_id?: string | null;
   requires_ref: boolean;
   is_active: boolean;
   meta: PaymentMethodMeta;

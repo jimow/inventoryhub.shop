@@ -82,6 +82,8 @@ export async function createCashPurchase(
     if (!payload.po_no) payload.po_no = await reserveNextNumber("nextPO", cfg.numbering?.poPrefix || "PO-");
     if (!payload.supplier_id) return { ok: false, error: "Supplier required" };
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
+    // A cash purchase pays now — the account it's paid from must be explicit.
+    if (!payment_method_id) return { ok: false, error: "Choose the cash/bank account to pay from." };
 
     const supabase = await createClient();
     // Insert as "ordered" so the receive core can run, then process immediately.

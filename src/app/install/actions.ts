@@ -69,7 +69,8 @@ async function runInstall(formData: FormData): Promise<InstallResult> {
   // Pin this deployment to the new tenant id. If the filesystem is read-only
   // (some hosts), tell the operator to set TENANT_ID in the env instead.
   try {
-    saveTenantConfig({ tenantId: res.tenantId, installed: true, companyName });
+    // A freshly-installed deployment is a tenant shop, not the platform console.
+    saveTenantConfig({ tenantId: res.tenantId, installed: true, companyName, platformConsole: false });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {

@@ -27,6 +27,7 @@ function readPayload(fd: FormData) {
     name: String(fd.get("name") || "").trim(),
     kind,
     bank_account_id: String(fd.get("bank_account_id") || "") || null,
+    account_id: String(fd.get("account_id") || "") || null,
     requires_ref: fd.get("requires_ref") === "on" || fd.get("requires_ref") === "true",
     is_active: fd.get("is_active") === "on" || fd.get("is_active") === "true",
     meta,
