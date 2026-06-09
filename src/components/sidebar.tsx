@@ -26,10 +26,12 @@ import {
   Undo2,
   History,
 } from "lucide-react";
+import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Module, PermissionMatrix } from "@/lib/permissions";
 import { can } from "@/lib/permissions";
 import type { SettingsData } from "@/lib/types";
+import { useMobileNav } from "@/components/mobile-nav";
 
 type NavItem = {
   href: string;
@@ -89,6 +91,7 @@ export function Sidebar({
   settings?: SettingsData;
 }) {
   const pathname = usePathname();
+  const { open, setOpen } = useMobileNav();
   const visible = NAV.filter((n) => can(permissions, n.module, "view"));
   const sections = SECTION_ORDER.filter((s) => visible.some((n) => n.section === s));
 
@@ -96,8 +99,8 @@ export function Sidebar({
   const tagline = settings?.company?.legalName || "Management";
   const logoUrl = settings?.branding?.logoUrl;
 
-  return (
-    <aside className="hidden md:flex md:flex-col md:fixed md:inset-y-0 md:left-0 md:w-64 bg-gradient-to-b from-slate-900 via-slate-900 to-[#0b1220] border-r border-slate-950/50 z-30 overflow-y-auto">
+  const inner = (
+    <>
       {/* Brand */}
       <div className="h-16 flex items-center gap-3 px-5 border-b border-white/10">
         {logoUrl ? (
@@ -141,6 +144,7 @@ export function Sidebar({
                     <Link
                       key={item.href}
                       href={item.href}
+                      onClick={() => setOpen(false)}
                       className={cn(
                         "group relative flex items-center gap-3 rounded-lg pl-3 pr-3 py-2 text-sm transition-all duration-150",
                         active
@@ -172,6 +176,44 @@ export function Sidebar({
           <span>Inventory System</span>
         </div>
       </div>
-    </aside>
+    </>
+  );
+
+  const surface = "bg-gradient-to-b from-slate-900 via-slate-900 to-[#0b1220] border-r border-slate-950/50";
+
+  return (
+    <>
+      {/* Desktop: fixed sidebar */}
+      <aside className={cn("hidden md:flex md:flex-col md:fixed md:inset-y-0 md:left-0 md:w-64 z-30 overflow-y-auto", surface)}>
+        {inner}
+      </aside>
+
+      {/* Mobile: slide-in drawer + backdrop */}
+      <div
+        className={cn(
+          "md:hidden fixed inset-0 z-50 transition-opacity duration-200",
+          open ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+        )}
+        aria-hidden={!open}
+      >
+        <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
+        <aside
+          className={cn(
+            "absolute inset-y-0 left-0 w-72 max-w-[85%] flex flex-col overflow-y-auto shadow-2xl transition-transform duration-200",
+            surface,
+            open ? "translate-x-0" : "-translate-x-full"
+          )}
+        >
+          <button
+            onClick={() => setOpen(false)}
+            className="absolute top-4 right-3 z-10 h-8 w-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10"
+            aria-label="Close menu"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          {inner}
+        </aside>
+      </div>
+    </>
   );
 }

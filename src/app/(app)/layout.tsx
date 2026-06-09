@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
 import { NavProgress } from "@/components/nav-progress";
+import { MobileNavProvider } from "@/components/mobile-nav";
 import { getCurrentSession } from "@/lib/auth";
 import { getActiveTenantStatus } from "@/lib/tenant-guard";
 import { getSettings } from "@/lib/numbering";
@@ -66,6 +67,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <SettingsProvider value={settings}>
+      <MobileNavProvider>
       <div className="min-h-screen">
         <Suspense fallback={null}>
           <NavProgress />
@@ -90,6 +92,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <div className="p-6">{children}</div>
         </main>
       </div>
+      </MobileNavProvider>
     </SettingsProvider>
   );
 }
