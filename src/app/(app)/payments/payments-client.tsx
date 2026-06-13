@@ -255,6 +255,8 @@ function SupplierPaymentDialog({
 
   const totalOutstanding = supplierPOs.reduce((s, x) => s + x.balance, 0);
   const overdueCount = supplierPOs.filter((p) => isPaymentOverdue(p.due_date)).length;
+  const selectedSupplier = suppliers.find((s) => s.id === supplierId);
+  const openingBal = Number(selectedSupplier?.opening_balance || 0);
   const selectedBalanceSum = supplierPOs
     .filter((p) => selectedPoIds.includes(p.id))
     .reduce((sum, p) => sum + p.balance, 0);
@@ -347,9 +349,22 @@ function SupplierPaymentDialog({
 
           {supplierId && (
             <>
-              <div className="rounded-lg border bg-gradient-to-br from-amber-50 to-amber-100/40 p-3 grid grid-cols-3 gap-2 text-sm">
+              {selectedSupplier && (
+                <div className="flex items-center justify-between text-xs">
+                  <Link href={`/suppliers/${selectedSupplier.id}`} className="text-blue-600 hover:underline font-medium">
+                    {selectedSupplier.name} — view details →
+                  </Link>
+                </div>
+              )}
+              <div className={`rounded-lg border bg-gradient-to-br from-amber-50 to-amber-100/40 p-3 grid ${openingBal !== 0 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"} gap-2 text-sm`}>
+                {openingBal !== 0 && (
+                  <div>
+                    <div className="text-[11px] uppercase text-amber-700/80 font-medium">Opening balance</div>
+                    <div className="text-xl font-bold text-amber-900">{formatMoney(openingBal)}</div>
+                  </div>
+                )}
                 <div>
-                  <div className="text-[11px] uppercase text-amber-700/80 font-medium">Outstanding</div>
+                  <div className="text-[11px] uppercase text-amber-700/80 font-medium">PO Outstanding</div>
                   <div className="text-xl font-bold text-amber-900">{formatMoney(totalOutstanding)}</div>
                 </div>
                 <div>
@@ -363,6 +378,12 @@ function SupplierPaymentDialog({
                   </div>
                 </div>
               </div>
+              {openingBal !== 0 && (
+                <p className="text-[11px] text-slate-500 -mt-1">
+                  Opening balance of {formatMoney(openingBal)} is owed from before the system started. Total owed:{" "}
+                  <b className="text-slate-700">{formatMoney(openingBal + totalOutstanding)}</b>. PO payments below settle the outstanding orders; the opening balance is carried in A/P.
+                </p>
+              )}
 
               {supplierPOs.length === 0 ? (
                 <div className="text-sm text-slate-500 text-center py-3 bg-slate-50 rounded">

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentSession, requireViewPermission } from "@/lib/auth";
+import { getSettings } from "@/lib/numbering";
 import { getLedgerSnapshot } from "@/lib/ledger";
 import { can } from "@/lib/permissions";
 import { Card, CardContent } from "@/components/ui/card";
@@ -65,7 +66,7 @@ export default async function DashboardPage({
     { data: suppliers },
     { data: sales },
     { data: purchases },
-    { data: settings },
+    cfg,
     { count: pendingApprovals },
     ledger,
   ] = await Promise.all([
@@ -74,7 +75,7 @@ export default async function DashboardPage({
     supabase.from("suppliers").select("id"),
     supabase.from("sales").select("id, invoice_no, date, status, total, customer_id").order("date", { ascending: false }),
     supabase.from("purchases").select("id, date, status, total"),
-    supabase.from("settings").select("data").eq("id", 1).single(),
+    getSettings(),
     supabase.from("payments").select("id", { count: "exact", head: true }).eq("approval_status", "pending"),
     getLedgerSnapshot(),
   ]);
@@ -84,8 +85,7 @@ export default async function DashboardPage({
   const S = (suppliers as Supplier[]) || [];
   const SL = (sales as Sale[]) || [];
   const PU = (purchases as Purchase[]) || [];
-  const cfg = (settings?.data as SettingsData) || ({} as SettingsData);
-  const sym = currencySymbol(cfg);
+  const sym = currencySymbol(cfg as SettingsData);
 
   // Period figures (operational): sum non-cancelled docs dated within range.
   const periodSales = SL.filter((x) => x.status !== "cancelled" && x.date >= start);
@@ -170,13 +170,13 @@ export default async function DashboardPage({
         </div>
       )}
 
-      {/* Master-data counts */}
+      {/* Master-data counts — each card links to its list */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        {show.products && <Stat label="Products" value={P.length} icon={Package} color="bg-blue-500" />}
-        {show.customers && <Stat label="Customers" value={C.length} icon={Users} color="bg-emerald-500" />}
-        {show.suppliers && <Stat label="Suppliers" value={S.length} icon={Truck} color="bg-amber-500" />}
-        {show.products && <Stat label="Inventory Value" value={formatMoney(ledger.inventory, sym)} icon={CircleDollarSign} color="bg-sky-500" />}
-        {show.products && <Stat label="Low Stock" value={lowCount} icon={AlertTriangle} color="bg-orange-500" />}
+        {show.products && <Link href="/products"><Stat label="Products" value={P.length} icon={Package} color="bg-blue-500" /></Link>}
+        {show.customers && <Link href="/customers"><Stat label="Customers" value={C.length} icon={Users} color="bg-emerald-500" /></Link>}
+        {show.suppliers && <Link href="/suppliers"><Stat label="Suppliers" value={S.length} icon={Truck} color="bg-amber-500" /></Link>}
+        {show.products && <Link href="/products"><Stat label="Inventory Value" value={formatMoney(ledger.inventory, sym)} icon={CircleDollarSign} color="bg-sky-500" /></Link>}
+        {show.products && <Link href="/products"><Stat label="Low Stock" value={lowCount} icon={AlertTriangle} color="bg-orange-500" sub={lowCount > 0 ? "Tap to reorder" : undefined} /></Link>}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
@@ -203,10 +203,14 @@ export default async function DashboardPage({
                     recentSales.map((s) => {
                       const cust = C.find((c) => c.id === s.customer_id);
                       return (
-                        <tr key={s.id} className="border-t">
-                          <td className="p-3 font-medium">{s.invoice_no}</td>
+                        <tr key={s.id} className="border-t hover:bg-slate-50">
+                          <td className="p-3 font-medium">
+                            <Link href="/sales" className="text-blue-600 hover:underline">{s.invoice_no}</Link>
+                          </td>
                           <td className="p-3">{formatDate(s.date)}</td>
-                          <td className="p-3">{cust?.name || "-"}</td>
+                          <td className="p-3">
+                            {cust ? <Link href={`/customers/${cust.id}`} className="text-blue-600 hover:underline">{cust.name}</Link> : "-"}
+                          </td>
                           <td className="p-3">
                             <Badge variant={s.status === "paid" ? "success" : s.status === "confirmed" ? "info" : s.status === "cancelled" ? "danger" : "secondary"}>
                               {s.status}
@@ -238,14 +242,16 @@ export default async function DashboardPage({
               ) : (
                 <ul className="divide-y">
                   {lowProducts.map((p) => (
-                    <li key={p.id} className="flex items-center justify-between py-2">
-                      <div>
-                        <div className="font-medium text-slate-900">{p.name}</div>
-                        <div className="text-xs text-muted-foreground">{p.code}</div>
-                      </div>
-                      <Badge variant="danger">
-                        {Number(p.current_stock || 0)} / {Number(p.min_stock || 0)} {p.unit}
-                      </Badge>
+                    <li key={p.id}>
+                      <Link href={`/products/${p.id}`} className="flex items-center justify-between py-2 -mx-2 px-2 rounded-lg hover:bg-slate-50">
+                        <div>
+                          <div className="font-medium text-blue-600 hover:underline">{p.name}</div>
+                          <div className="text-xs text-muted-foreground">{p.code}</div>
+                        </div>
+                        <Badge variant="danger">
+                          {Number(p.current_stock || 0)} / {Number(p.min_stock || 0)} {p.unit}
+                        </Badge>
+                      </Link>
                     </li>
                   ))}
                 </ul>

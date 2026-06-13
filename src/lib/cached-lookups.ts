@@ -27,7 +27,7 @@ export const getCachedSuppliersList = unstable_cache(
   async () => {
     const admin = createServiceClient();
     const tid = currentTenantId();
-    let q = admin.from("suppliers").select("id, name").order("name");
+    let q = admin.from("suppliers").select("id, name, opening_balance").order("name");
     if (tid) q = q.eq("tenant_id", tid);
     const { data } = await q;
     return data ?? [];
