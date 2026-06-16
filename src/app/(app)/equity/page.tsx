@@ -16,11 +16,22 @@ export default async function EquityPage() {
 
   let shQ = admin.from("shareholders").select("*").order("name");
   let coQ = admin.from("equity_contributions").select("*").order("created_at", { ascending: false });
-  if (tid) { shQ = shQ.eq("tenant_id", tid); coQ = coQ.eq("tenant_id", tid); }
+  let obeAcctQ = admin.from("accounts").select("id").eq("code", "3200");
+  if (tid) { shQ = shQ.eq("tenant_id", tid); coQ = coQ.eq("tenant_id", tid); obeAcctQ = obeAcctQ.eq("tenant_id", tid); }
 
-  const [{ data: shareholders }, { data: contributions }, methods, settings, ledger] = await Promise.all([
-    shQ, coQ, getCachedPaymentMethods(), getSettings(), getLedgerSnapshot(),
+  const [{ data: shareholders }, { data: contributions }, methods, settings, ledger, { data: obeAcct }] = await Promise.all([
+    shQ, coQ, getCachedPaymentMethods(), getSettings(), getLedgerSnapshot(), obeAcctQ.maybeSingle(),
   ]);
+
+  // Opening Balance Equity (3200) credit balance still available to allocate to
+  // shareholders as opening capital.
+  let openingAvailable = 0;
+  if (obeAcct?.id) {
+    let lq = admin.from("journal_lines").select("debit, credit").eq("account_id", obeAcct.id);
+    if (tid) lq = lq.eq("tenant_id", tid);
+    const { data: obeLines } = await lq;
+    openingAvailable = (obeLines || []).reduce((s, l) => s + Number(l.credit) - Number(l.debit), 0);
+  }
 
   return (
     <EquityClient
@@ -31,6 +42,7 @@ export default async function EquityPage() {
       contributedEquity={ledger.ownerEquity}
       retainedEarnings={ledger.netProfit}
       equityTotal={ledger.totalEquity}
+      openingAvailable={openingAvailable}
       permissions={permissions}
     />
   );

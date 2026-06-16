@@ -44,7 +44,7 @@ export async function checkoutPos(input: PosCheckoutInput): Promise<PosCheckoutR
     const admin = createServiceClient();
     const cfg = await getSettings();
 
-    const totals = await computeTotals(input.lines, input.discount, input.tax_rate, "sales", !!cfg.tax?.inclusive);
+    const totals = await computeTotals(input.lines, input.discount, Number(cfg.tax?.defaultRate || 0), "sales", !!cfg.tax?.inclusive);
     const { subtotal, discount, tax, total } = totals;
 
     // How much is actually paid now. If a partial amount is given, the rest
@@ -209,7 +209,7 @@ export async function posStkInitiate(input: StkInitiateInput): Promise<StkInitia
     const admin = createServiceClient();
     const cfg = await getSettings();
 
-    const totals = await computeTotals(input.lines, input.discount, input.tax_rate, "sales", !!cfg.tax?.inclusive);
+    const totals = await computeTotals(input.lines, input.discount, Number(cfg.tax?.defaultRate || 0), "sales", !!cfg.tax?.inclusive);
     const { subtotal, discount, tax, total } = totals;
 
     for (const l of input.lines) {

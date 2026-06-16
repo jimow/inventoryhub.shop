@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Package, ShoppingCart, Receipt as ReceiptIcon, Sliders, Box } from "lucide-react";
+import { ArrowLeft, Package, ShoppingCart, Receipt as ReceiptIcon, Sliders, Box, Undo2 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/server";
 import { requireViewPermission, getCurrentSession } from "@/lib/auth";
@@ -12,11 +12,11 @@ import { Input } from "@/components/ui/input";
 import { formatMoney, formatDate } from "@/lib/utils";
 import type { Product, Sale, Purchase } from "@/lib/types";
 
-type SP = Promise<{ from?: string; to?: string; type?: string }>;
+type SP = Promise<{ from?: string; to?: string; type?: string; dir?: string }>;
 
 type TimelineRow = {
   ts: string;
-  kind: "purchase" | "sale" | "adjustment" | "opening";
+  kind: "purchase" | "sale" | "purchase_return" | "sale_return" | "adjustment" | "opening";
   doc: string;
   detail: string;
   qty: number;          // positive = stock in, negative = stock out
@@ -51,6 +51,8 @@ export default async function ProductDetail({
     { data: units },
     { data: customers },
     { data: suppliers },
+    { data: salesReturns },
+    { data: purchaseReturns },
   ] = await Promise.all([
     supabase.from("purchases").select("id, po_no, date, items, status, total, supplier_id"),
     supabase.from("sales").select("id, invoice_no, date, items, status, total, customer_id"),
@@ -59,6 +61,8 @@ export default async function ProductDetail({
       .eq("product_id", id).order("created_at", { ascending: false }),
     supabase.from("customers").select("id, name"),
     supabase.from("suppliers").select("id, name"),
+    supabase.from("sales_returns").select("return_no, date, items, status, customer_id"),
+    supabase.from("purchase_returns").select("return_no, date, items, status, supplier_id"),
   ]);
   const customerName = new Map((customers || []).map((c) => [c.id as string, c.name as string]));
   const supplierName = new Map((suppliers || []).map((s) => [s.id as string, s.name as string]));
@@ -104,6 +108,43 @@ export default async function ProductDetail({
     }
   }
 
+  // Customer returns goods → stock IN.
+  type Ret = { return_no: string | null; date: string; items: { refId: string; name: string; qty: number; price: number }[]; status: string; customer_id?: string | null; supplier_id?: string | null };
+  for (const sr of (salesReturns || []) as Ret[]) {
+    if (sr.status === "cancelled") continue;
+    for (const l of (sr.items || []).filter((l) => l.refId === id)) {
+      rows.push({
+        ts: sr.date,
+        kind: "sale_return",
+        doc: sr.return_no || "Return",
+        detail: `Customer returned ${l.qty} × ${formatMoney(l.price)}`,
+        qty: Number(l.qty),
+        value: Number(l.qty) * Number(l.price),
+        url: `/returns`,
+        party: sr.customer_id ? (customerName.get(sr.customer_id) || "Customer") : "Walk-in",
+        partyUrl: sr.customer_id ? `/customers/${sr.customer_id}` : undefined,
+      });
+    }
+  }
+
+  // We return goods to a supplier → stock OUT.
+  for (const pr of (purchaseReturns || []) as Ret[]) {
+    if (pr.status === "cancelled") continue;
+    for (const l of (pr.items || []).filter((l) => l.refId === id)) {
+      rows.push({
+        ts: pr.date,
+        kind: "purchase_return",
+        doc: pr.return_no || "Return",
+        detail: `Returned ${l.qty} × ${formatMoney(l.price)} to supplier`,
+        qty: -Number(l.qty),
+        value: Number(l.qty) * Number(l.price),
+        url: `/returns`,
+        party: pr.supplier_id ? (supplierName.get(pr.supplier_id) || "Supplier") : undefined,
+        partyUrl: pr.supplier_id ? `/suppliers/${pr.supplier_id}` : undefined,
+      });
+    }
+  }
+
   type Adj = { id: string; qty_change: number; reason: string; total_value: number; created_at: string; notes: string | null };
   for (const a of (adjustments || []) as Adj[]) {
     rows.push({
@@ -134,6 +175,8 @@ export default async function ProductDetail({
       if (fromDate && r.ts < fromDate) return false;
       if (toDate && r.ts > toDate) return false;
       if (sp.type && r.kind !== sp.type) return false;
+      if (sp.dir === "in" && r.qty <= 0) return false;
+      if (sp.dir === "out" && r.qty >= 0) return false;
       return true;
     })
     .sort((a, b) => a.ts.localeCompare(b.ts) || a.kind.localeCompare(b.kind));
@@ -146,6 +189,8 @@ export default async function ProductDetail({
   const purchasedQty = filtered.filter((r) => r.kind === "purchase").reduce((s, r) => s + r.qty, 0);
   const soldQty      = -filtered.filter((r) => r.kind === "sale").reduce((s, r) => s + r.qty, 0);
   const adjQty       = filtered.filter((r) => r.kind === "adjustment" || r.kind === "opening").reduce((s, r) => s + r.qty, 0);
+  const returnedInQty  = filtered.filter((r) => r.kind === "sale_return").reduce((s, r) => s + r.qty, 0);
+  const returnedOutQty = -filtered.filter((r) => r.kind === "purchase_return").reduce((s, r) => s + r.qty, 0);
   const purchasedVal = filtered.filter((r) => r.kind === "purchase").reduce((s, r) => s + r.value, 0);
   const soldVal      = filtered.filter((r) => r.kind === "sale").reduce((s, r) => s + r.value, 0);
 
@@ -182,8 +227,13 @@ export default async function ProductDetail({
           <div className="text-2xl font-bold text-slate-900 mt-1">{formatMoney(purchasedVal)}</div>
         </CardContent></Card>
         <Card><CardContent className="p-4">
-          <div className="text-xs uppercase tracking-wider text-slate-500">Stock adjustments (range)</div>
-          <div className="text-2xl font-bold text-slate-900 mt-1">{adjQty > 0 ? `+${adjQty}` : adjQty}</div>
+          <div className="text-xs uppercase tracking-wider text-slate-500">Returns (range)</div>
+          <div className="text-2xl font-bold text-slate-900 mt-1">
+            <span className="text-emerald-700">+{returnedInQty}</span>
+            <span className="text-slate-400 mx-1">/</span>
+            <span className="text-amber-700">-{returnedOutQty}</span>
+          </div>
+          <div className="text-[11px] text-slate-500">in (sales returns) · out (purchase returns) · adj {adjQty > 0 ? `+${adjQty}` : adjQty}</div>
         </CardContent></Card>
       </div>
 
@@ -191,29 +241,51 @@ export default async function ProductDetail({
       <Card className="mb-4">
         <CardContent className="p-4">
           <form className="grid grid-cols-12 gap-3 items-end" action="">
-            <div className="col-span-3">
+            <div className="col-span-6 sm:col-span-3">
               <label className="text-xs text-slate-500">From (created {p.created_at ? formatDate(String(p.created_at).slice(0, 10)) : "—"})</label>
               <Input type="date" name="from" defaultValue={fromDate} />
             </div>
-            <div className="col-span-3">
+            <div className="col-span-6 sm:col-span-3">
               <label className="text-xs text-slate-500">To</label>
               <Input type="date" name="to" defaultValue={toDate} />
             </div>
-            <div className="col-span-3">
+            <div className="col-span-6 sm:col-span-2">
               <label className="text-xs text-slate-500">Type</label>
               <select name="type" defaultValue={sp.type || ""} className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm">
-                <option value="">All</option>
+                <option value="">All types</option>
                 <option value="purchase">Purchases</option>
                 <option value="sale">Sales</option>
+                <option value="sale_return">Sales returns</option>
+                <option value="purchase_return">Purchase returns</option>
                 <option value="adjustment">Adjustments</option>
                 <option value="opening">Opening balances</option>
               </select>
             </div>
-            <div className="col-span-3 flex gap-2">
+            <div className="col-span-6 sm:col-span-2">
+              <label className="text-xs text-slate-500">Direction</label>
+              <select name="dir" defaultValue={sp.dir || ""} className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm">
+                <option value="">All</option>
+                <option value="in">Stock in</option>
+                <option value="out">Stock out</option>
+              </select>
+            </div>
+            <div className="col-span-12 sm:col-span-2 flex gap-2">
               <Button type="submit" size="sm">Filter</Button>
               <Button type="button" size="sm" variant="outline" asChild>
                 <Link href={`/products/${id}`}>Reset</Link>
               </Button>
+            </div>
+            <div className="col-span-12 flex flex-wrap gap-1.5 pt-1">
+              {([
+                ["This month", new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)],
+                ["This year", `${new Date().getFullYear()}-01-01`],
+                ["All time", p.created_at ? String(p.created_at).slice(0, 10) : ""],
+              ] as const).map(([label, f]) => (
+                <Link key={label} href={`/products/${id}?from=${f}&to=${today}${sp.type ? `&type=${sp.type}` : ""}${sp.dir ? `&dir=${sp.dir}` : ""}`}
+                  className="text-[11px] px-2 py-1 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">
+                  {label}
+                </Link>
+              ))}
             </div>
           </form>
         </CardContent>
@@ -338,9 +410,11 @@ function Stat({ label, value, icon: Icon, color }: { label: string; value: strin
 
 function KindBadge({ kind }: { kind: TimelineRow["kind"] }) {
   switch (kind) {
-    case "purchase":   return <Badge variant="warning" className="inline-flex items-center gap-1"><ShoppingCart className="h-3 w-3" />Purchase</Badge>;
-    case "sale":       return <Badge variant="info"    className="inline-flex items-center gap-1"><ReceiptIcon className="h-3 w-3" />Sale</Badge>;
-    case "adjustment": return <Badge variant="secondary" className="inline-flex items-center gap-1"><Sliders className="h-3 w-3" />Adjustment</Badge>;
-    case "opening":    return <Badge variant="success" className="inline-flex items-center gap-1"><Box className="h-3 w-3" />Opening</Badge>;
+    case "purchase":        return <Badge variant="warning" className="inline-flex items-center gap-1"><ShoppingCart className="h-3 w-3" />Purchase</Badge>;
+    case "sale":            return <Badge variant="info"    className="inline-flex items-center gap-1"><ReceiptIcon className="h-3 w-3" />Sale</Badge>;
+    case "sale_return":     return <Badge variant="success" className="inline-flex items-center gap-1"><Undo2 className="h-3 w-3" />Sale return</Badge>;
+    case "purchase_return": return <Badge variant="danger"  className="inline-flex items-center gap-1"><Undo2 className="h-3 w-3" />Purchase return</Badge>;
+    case "adjustment":      return <Badge variant="secondary" className="inline-flex items-center gap-1"><Sliders className="h-3 w-3" />Adjustment</Badge>;
+    case "opening":         return <Badge variant="success" className="inline-flex items-center gap-1"><Box className="h-3 w-3" />Opening</Badge>;
   }
 }

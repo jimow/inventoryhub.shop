@@ -184,21 +184,29 @@ export type LineTotals = { subtotal: number; tax: number; total: number };
  * gets saved) and the server action (so the saved total matches the journal).
  */
 export function computeLineTotals(
-  lines: { qty: number | string; price: number | string }[],
+  lines: { qty: number | string; price: number | string; taxable?: boolean }[],
   discount: number = 0,
   taxRate: number = 0,
   inclusive: boolean = false,
 ): LineTotals {
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const subtotal = lines.reduce((s, l) => s + Number(l.qty) * Number(l.price), 0);
+  // Only lines whose product is taxable contribute to the tax base. taxable ===
+  // false is exempt (tax 0); undefined defaults to taxable (no regression).
+  const taxableSub = lines.reduce(
+    (s, l) => s + (l.taxable === false ? 0 : Number(l.qty) * Number(l.price)),
+    0,
+  );
   const disc = Math.max(0, Number(discount) || 0);
   const gross = Math.max(0, subtotal - disc);
   const rate = Number(taxRate) || 0;
+  // Allocate the discount proportionally so tax applies to the taxable share.
+  const taxableGross = subtotal > 0 ? Math.max(0, taxableSub - disc * (taxableSub / subtotal)) : 0;
   if (inclusive) {
-    const net = rate > 0 ? gross / (1 + rate / 100) : gross;
-    return { subtotal: r2(subtotal), tax: r2(gross - net), total: r2(gross) };
+    const net = rate > 0 ? taxableGross / (1 + rate / 100) : taxableGross;
+    return { subtotal: r2(subtotal), tax: r2(taxableGross - net), total: r2(gross) };
   }
-  const tax = (gross * rate) / 100;
+  const tax = (taxableGross * rate) / 100;
   return { subtotal: r2(subtotal), tax: r2(tax), total: r2(gross + tax) };
 }
 

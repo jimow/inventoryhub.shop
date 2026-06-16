@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   Scale, TrendingUp, Building2, BookOpen, BarChart3,
   Printer, Wrench, Loader2, AlertTriangle,
+  Receipt, ShoppingCart, Package, Wallet, HandCoins,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { PageHeader } from "@/components/page-header";
@@ -17,14 +19,41 @@ import { cn, formatMoney, formatDate, currencySymbol } from "@/lib/utils";
 import type { Account, JournalLine, JournalEntry, SettingsData } from "@/lib/types";
 import { reconcileOpeningStockEquity } from "../products/actions";
 
-type Tab = "trial" | "pnl" | "balance" | "ledger" | "summary";
+type Tab =
+  | "trial" | "pnl" | "balance" | "ledger" | "summary"
+  | "sales" | "purchases" | "stock" | "payments" | "receipts";
 
-const TABS: { id: Tab; label: string; icon: React.ElementType; description: string }[] = [
-  { id: "summary", label: "Account Balances", icon: BarChart3,  description: "Current balance for every account, grouped by type" },
-  { id: "trial",   label: "Trial Balance",    icon: Scale,      description: "Debit and credit balances for the selected period" },
-  { id: "pnl",     label: "Profit & Loss",    icon: TrendingUp, description: "Income vs expenses over the selected period" },
-  { id: "balance", label: "Balance Sheet",    icon: Building2,  description: "Assets, Liabilities and Equity at a point in time" },
-  { id: "ledger",  label: "General Ledger",   icon: BookOpen,   description: "Full transaction history for a single account" },
+/** Lightweight row shapes for the operational reports (fetched in page.tsx). */
+export type NameRef = { id: string; name: string };
+export type ReportSale = {
+  id: string; invoice_no: string; date: string; customer_id: string | null;
+  subtotal: number; discount: number; tax: number; total: number; status: string; sale_type: string;
+};
+export type ReportPurchase = {
+  id: string; po_no: string; date: string; supplier_id: string | null;
+  subtotal: number; discount: number; tax: number; total: number; status: string;
+};
+export type ReportPayment = {
+  id: string; payment_no: string; date: string; direction: "in" | "out"; source_type: string;
+  amount: number; customer_id: string | null; supplier_id: string | null;
+  payment_method_id: string | null; reference: string | null;
+};
+export type ReportProduct = {
+  id: string; name: string; code: string; category: string | null;
+  cost_price: number; selling_price: number; current_stock: number; min_stock: number; status: string;
+};
+
+const TABS: { id: Tab; label: string; icon: React.ElementType; description: string; group: "accounting" | "operations" }[] = [
+  { id: "summary", label: "Account Balances", icon: BarChart3,  description: "Current balance for every account, grouped by type", group: "accounting" },
+  { id: "trial",   label: "Trial Balance",    icon: Scale,      description: "Debit and credit balances for the selected period", group: "accounting" },
+  { id: "pnl",     label: "Profit & Loss",    icon: TrendingUp, description: "Income vs expenses over the selected period", group: "accounting" },
+  { id: "balance", label: "Balance Sheet",    icon: Building2,  description: "Assets, Liabilities and Equity at a point in time", group: "accounting" },
+  { id: "ledger",  label: "General Ledger",   icon: BookOpen,   description: "Full transaction history for a single account", group: "accounting" },
+  { id: "sales",     label: "Sales Report",     icon: Receipt,      description: "Every sale in the period with totals and tax", group: "operations" },
+  { id: "purchases", label: "Purchases Report", icon: ShoppingCart, description: "Every purchase order in the period with totals", group: "operations" },
+  { id: "stock",     label: "Stock Report",     icon: Package,      description: "Current stock on hand with cost and retail value", group: "operations" },
+  { id: "payments",  label: "Payments Report",  icon: Wallet,       description: "Money paid out (to suppliers and others)", group: "operations" },
+  { id: "receipts",  label: "Receipts Report",  icon: HandCoins,    description: "Money received (from customers and others)", group: "operations" },
 ];
 
 /* -------------------------------------------------------------------------- */
@@ -89,15 +118,32 @@ type BankOpening = { account_id: string; opening_balance: number };
 
 export function ReportsClient({
   accounts, lines, entries, bankOpenings, settings,
+  sales = [], purchases = [], payments = [], products = [],
+  customers = [], suppliers = [], methods = [],
 }: {
   accounts: Account[];
   lines: JournalLine[];
   entries: JournalEntry[];
   bankOpenings: BankOpening[];
   settings: SettingsData;
+  sales?: ReportSale[];
+  purchases?: ReportPurchase[];
+  payments?: ReportPayment[];
+  products?: ReportProduct[];
+  customers?: NameRef[];
+  suppliers?: NameRef[];
+  methods?: NameRef[];
 }) {
   const [tab, setTab] = useState<Tab>("summary");
   const sym = currencySymbol(settings);
+
+  const nameOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of customers) m.set(`c:${c.id}`, c.name);
+    for (const s of suppliers) m.set(`s:${s.id}`, s.name);
+    for (const p of methods) m.set(`m:${p.id}`, p.name);
+    return m;
+  }, [customers, suppliers, methods]);
 
   // Date controls used by trial / pnl / ledger (range) and balance (as-of)
   const [from, setFrom] = useState(startOfMonth());
@@ -131,7 +177,8 @@ export function ReportsClient({
     else if (preset === "all") { setFrom("1970-01-01"); setTo("9999-12-31"); }
   }
 
-  const usesRange = tab === "trial" || tab === "pnl" || tab === "ledger";
+  const usesRange = tab === "trial" || tab === "pnl" || tab === "ledger"
+    || tab === "sales" || tab === "purchases" || tab === "payments" || tab === "receipts";
   const usesAsOf = tab === "balance";
   const activeTab = TABS.find((t) => t.id === tab)!;
 
@@ -268,6 +315,21 @@ export function ReportsClient({
           from={from} to={to} sym={sym}
         />
       )}
+      {tab === "sales" && (
+        <SalesReport sales={sales} nameOf={nameOf} from={from} to={to} sym={sym} />
+      )}
+      {tab === "purchases" && (
+        <PurchasesReport purchases={purchases} nameOf={nameOf} from={from} to={to} sym={sym} />
+      )}
+      {tab === "stock" && (
+        <StockReport products={products} sym={sym} />
+      )}
+      {tab === "payments" && (
+        <PaymentsReport payments={payments} nameOf={nameOf} from={from} to={to} sym={sym} dir="out" />
+      )}
+      {tab === "receipts" && (
+        <PaymentsReport payments={payments} nameOf={nameOf} from={from} to={to} sym={sym} dir="in" />
+      )}
 
       {/* Print-only styles */}
       <style jsx global>{`
@@ -400,8 +462,8 @@ function TrialBalance({
             <tr><td colSpan={5} className="p-8 text-center text-slate-500">No journal activity in this date range.</td></tr>
           ) : rows.map((r) => (
             <tr key={r.id} className="border-t hover:bg-slate-50">
-              <td className="px-4 py-2 font-mono text-slate-600">{r.code}</td>
-              <td className="px-4 py-2 font-medium text-slate-900">{r.name}</td>
+              <td className="px-4 py-2 font-mono"><Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="text-blue-600 hover:underline">{r.code}</Link></td>
+              <td className="px-4 py-2 font-medium"><Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="text-blue-600 hover:underline">{r.name}</Link></td>
               <td className="px-4 py-2 capitalize text-slate-500 text-xs">{r.type}</td>
               <td className="px-4 py-2 text-right tabular-nums">
                 {r.balance_debit > 0 ? formatMoney(r.balance_debit, sym) : <span className="text-slate-300">—</span>}
@@ -522,7 +584,7 @@ function Section({
         <div className="space-y-0.5">
           {rows.map((r) => (
             <div key={r.id} className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
-              <span><span className="text-slate-500 font-mono mr-2">{r.code}</span>{r.name}</span>
+              <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="hover:underline"><span className="text-slate-500 font-mono mr-2">{r.code}</span><span className="text-blue-600">{r.name}</span></Link>
               <span className="tabular-nums font-medium">{formatMoney(r.amount, sym)}</span>
             </div>
           ))}
@@ -611,7 +673,7 @@ function BalanceSheet({
             <div className="space-y-0.5">
               {assets.map((r) => (
                 <div key={r.id} className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
-                  <span><span className="text-slate-500 font-mono mr-2">{r.code}</span>{r.name}</span>
+                  <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="hover:underline"><span className="text-slate-500 font-mono mr-2">{r.code}</span><span className="text-blue-600">{r.name}</span></Link>
                   <span className="tabular-nums font-medium">{formatMoney(r.balance, sym)}</span>
                 </div>
               ))}
@@ -634,7 +696,7 @@ function BalanceSheet({
             <div className="space-y-0.5">
               {liabilities.map((r) => (
                 <div key={r.id} className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
-                  <span><span className="text-slate-500 font-mono mr-2">{r.code}</span>{r.name}</span>
+                  <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="hover:underline"><span className="text-slate-500 font-mono mr-2">{r.code}</span><span className="text-blue-600">{r.name}</span></Link>
                   <span className="tabular-nums font-medium">{formatMoney(r.balance, sym)}</span>
                 </div>
               ))}
@@ -651,7 +713,7 @@ function BalanceSheet({
           <div className="space-y-0.5">
             {equity.map((r) => (
               <div key={r.id} className="flex justify-between py-1.5 px-2 hover:bg-slate-50 rounded text-sm">
-                <span><span className="text-slate-500 font-mono mr-2">{r.code}</span>{r.name}</span>
+                <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="hover:underline"><span className="text-slate-500 font-mono mr-2">{r.code}</span><span className="text-blue-600">{r.name}</span></Link>
                 <span className="tabular-nums font-medium">{formatMoney(r.balance, sym)}</span>
               </div>
             ))}
@@ -894,6 +956,279 @@ function GeneralLedger({
           </tbody>
         </table>
       )}
+    </Card>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* OPERATIONAL REPORTS: Sales / Purchases / Stock / Payments / Receipts        */
+/* -------------------------------------------------------------------------- */
+function inDateRange(d: string, from: string, to: string) {
+  const day = (d || "").slice(0, 10);
+  return day >= from && day <= to;
+}
+
+function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="rounded-md border bg-white px-4 py-3">
+      <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-lg font-bold tabular-nums text-slate-900">{value}</div>
+      {sub && <div className="text-[11px] text-slate-500">{sub}</div>}
+    </div>
+  );
+}
+
+function SalesReport({
+  sales, nameOf, from, to, sym,
+}: { sales: ReportSale[]; nameOf: Map<string, string>; from: string; to: string; sym: string }) {
+  const rows = sales
+    .filter((s) => s.status !== "cancelled" && inDateRange(s.date, from, to))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const sub = rows.reduce((s, r) => s + Number(r.subtotal), 0);
+  const disc = rows.reduce((s, r) => s + Number(r.discount), 0);
+  const tax = rows.reduce((s, r) => s + Number(r.tax), 0);
+  const total = rows.reduce((s, r) => s + Number(r.total), 0);
+
+  return (
+    <Card>
+      <div className="p-4 border-b">
+        <div className="font-semibold text-slate-900">Sales Report</div>
+        <div className="text-xs text-slate-500">{formatDate(from)} — {formatDate(to)} · {rows.length} sale(s), excludes cancelled</div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-4 print:hidden">
+        <StatCard label="Net sales" value={formatMoney(sub - disc, sym)} />
+        <StatCard label="Tax" value={formatMoney(tax, sym)} />
+        <StatCard label="Discounts" value={formatMoney(disc, sym)} />
+        <StatCard label="Total" value={formatMoney(total, sym)} />
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
+          <tr>
+            <th className="text-left px-3 py-2 w-28">Date</th>
+            <th className="text-left px-3 py-2 w-32">Invoice</th>
+            <th className="text-left px-3 py-2">Customer</th>
+            <th className="text-left px-3 py-2 w-24">Type</th>
+            <th className="text-right px-3 py-2 w-28">Subtotal</th>
+            <th className="text-right px-3 py-2 w-24">Tax</th>
+            <th className="text-right px-3 py-2 w-28">Total</th>
+            <th className="text-left px-3 py-2 w-24">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={8} className="p-8 text-center text-slate-500">No sales in this period.</td></tr>
+          ) : rows.map((r) => (
+            <tr key={r.id} className="border-t hover:bg-slate-50">
+              <td className="px-3 py-2 text-slate-600">{formatDate(r.date)}</td>
+              <td className="px-3 py-2 font-mono text-xs">
+                <Link href={`/sales?q=${encodeURIComponent(r.invoice_no)}`} target="_blank" className="text-blue-600 hover:underline">{r.invoice_no}</Link>
+              </td>
+              <td className="px-3 py-2">{nameOf.get(`c:${r.customer_id}`) || <span className="text-slate-400">—</span>}</td>
+              <td className="px-3 py-2 capitalize text-slate-500 text-xs">{r.sale_type}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{formatMoney(r.subtotal, sym)}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{formatMoney(r.tax, sym)}</td>
+              <td className="px-3 py-2 text-right tabular-nums font-medium">{formatMoney(r.total, sym)}</td>
+              <td className="px-3 py-2 capitalize text-xs text-slate-500">{r.status}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
+            <td className="px-3 py-2.5" colSpan={4}>Totals</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(sub, sym)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(tax, sym)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(total, sym)}</td>
+            <td />
+          </tr>
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+function PurchasesReport({
+  purchases, nameOf, from, to, sym,
+}: { purchases: ReportPurchase[]; nameOf: Map<string, string>; from: string; to: string; sym: string }) {
+  const rows = purchases
+    .filter((p) => p.status !== "cancelled" && inDateRange(p.date, from, to))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const sub = rows.reduce((s, r) => s + Number(r.subtotal), 0);
+  const tax = rows.reduce((s, r) => s + Number(r.tax), 0);
+  const total = rows.reduce((s, r) => s + Number(r.total), 0);
+
+  return (
+    <Card>
+      <div className="p-4 border-b">
+        <div className="font-semibold text-slate-900">Purchases Report</div>
+        <div className="text-xs text-slate-500">{formatDate(from)} — {formatDate(to)} · {rows.length} order(s), excludes cancelled</div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 p-4 print:hidden">
+        <StatCard label="Net purchases" value={formatMoney(sub, sym)} />
+        <StatCard label="Tax" value={formatMoney(tax, sym)} />
+        <StatCard label="Total" value={formatMoney(total, sym)} />
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
+          <tr>
+            <th className="text-left px-3 py-2 w-28">Date</th>
+            <th className="text-left px-3 py-2 w-32">PO #</th>
+            <th className="text-left px-3 py-2">Supplier</th>
+            <th className="text-right px-3 py-2 w-28">Subtotal</th>
+            <th className="text-right px-3 py-2 w-24">Tax</th>
+            <th className="text-right px-3 py-2 w-28">Total</th>
+            <th className="text-left px-3 py-2 w-24">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={7} className="p-8 text-center text-slate-500">No purchases in this period.</td></tr>
+          ) : rows.map((r) => (
+            <tr key={r.id} className="border-t hover:bg-slate-50">
+              <td className="px-3 py-2 text-slate-600">{formatDate(r.date)}</td>
+              <td className="px-3 py-2 font-mono text-xs">
+                <Link href={`/purchases?q=${encodeURIComponent(r.po_no)}`} target="_blank" className="text-blue-600 hover:underline">{r.po_no}</Link>
+              </td>
+              <td className="px-3 py-2">{nameOf.get(`s:${r.supplier_id}`) || <span className="text-slate-400">—</span>}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{formatMoney(r.subtotal, sym)}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{formatMoney(r.tax, sym)}</td>
+              <td className="px-3 py-2 text-right tabular-nums font-medium">{formatMoney(r.total, sym)}</td>
+              <td className="px-3 py-2 capitalize text-xs text-slate-500">{r.status}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
+            <td className="px-3 py-2.5" colSpan={3}>Totals</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(sub, sym)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(tax, sym)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(total, sym)}</td>
+            <td />
+          </tr>
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+function StockReport({ products, sym }: { products: ReportProduct[]; sym: string }) {
+  const rows = products
+    .filter((p) => p.status !== "inactive")
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const costValue = rows.reduce((s, r) => s + Number(r.current_stock) * Number(r.cost_price), 0);
+  const retailValue = rows.reduce((s, r) => s + Number(r.current_stock) * Number(r.selling_price), 0);
+  const units = rows.reduce((s, r) => s + Number(r.current_stock), 0);
+  const lowCount = rows.filter((r) => Number(r.min_stock) > 0 && Number(r.current_stock) <= Number(r.min_stock)).length;
+
+  return (
+    <Card>
+      <div className="p-4 border-b">
+        <div className="font-semibold text-slate-900">Stock Report</div>
+        <div className="text-xs text-slate-500">Current stock on hand · {rows.length} product(s)</div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-4 print:hidden">
+        <StatCard label="Stock value (cost)" value={formatMoney(costValue, sym)} />
+        <StatCard label="Stock value (retail)" value={formatMoney(retailValue, sym)} />
+        <StatCard label="Units on hand" value={units.toLocaleString()} />
+        <StatCard label="Low / out of stock" value={String(lowCount)} sub="at or below min" />
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
+          <tr>
+            <th className="text-left px-3 py-2 w-24">Code</th>
+            <th className="text-left px-3 py-2">Product</th>
+            <th className="text-right px-3 py-2 w-24">On hand</th>
+            <th className="text-right px-3 py-2 w-24">Min</th>
+            <th className="text-right px-3 py-2 w-28">Cost</th>
+            <th className="text-right px-3 py-2 w-32">Cost value</th>
+            <th className="text-right px-3 py-2 w-32">Retail value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={7} className="p-8 text-center text-slate-500">No products.</td></tr>
+          ) : rows.map((r) => {
+            const low = Number(r.min_stock) > 0 && Number(r.current_stock) <= Number(r.min_stock);
+            return (
+              <tr key={r.id} className="border-t hover:bg-slate-50">
+                <td className="px-3 py-2 font-mono text-xs">
+                  <Link href={`/products/${r.id}`} target="_blank" className="text-blue-600 hover:underline">{r.code}</Link>
+                </td>
+                <td className="px-3 py-2">{r.name}</td>
+                <td className={cn("px-3 py-2 text-right tabular-nums", low && "text-red-600 font-semibold")}>{Number(r.current_stock).toLocaleString()}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{Number(r.min_stock).toLocaleString()}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatMoney(r.cost_price, sym)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Number(r.current_stock) * Number(r.cost_price), sym)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatMoney(Number(r.current_stock) * Number(r.selling_price), sym)}</td>
+              </tr>
+            );
+          })}
+          <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
+            <td className="px-3 py-2.5" colSpan={5}>Totals</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(costValue, sym)}</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(retailValue, sym)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+function PaymentsReport({
+  payments, nameOf, from, to, sym, dir,
+}: {
+  payments: ReportPayment[]; nameOf: Map<string, string>;
+  from: string; to: string; sym: string; dir: "in" | "out";
+}) {
+  const rows = payments
+    .filter((p) => p.direction === dir && inDateRange(p.date, from, to))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const total = rows.reduce((s, r) => s + Number(r.amount), 0);
+  const isReceipt = dir === "in";
+  const title = isReceipt ? "Receipts Report" : "Payments Report";
+  const partyLabel = isReceipt ? "From" : "To";
+
+  function party(r: ReportPayment) {
+    if (r.customer_id) return nameOf.get(`c:${r.customer_id}`) || "Customer";
+    if (r.supplier_id) return nameOf.get(`s:${r.supplier_id}`) || "Supplier";
+    return "—";
+  }
+
+  return (
+    <Card>
+      <div className="p-4 border-b">
+        <div className="font-semibold text-slate-900">{title}</div>
+        <div className="text-xs text-slate-500">{formatDate(from)} — {formatDate(to)} · {rows.length} entry(ies)</div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 p-4 print:hidden">
+        <StatCard label={isReceipt ? "Total received" : "Total paid"} value={formatMoney(total, sym)} />
+        <StatCard label="Entries" value={String(rows.length)} />
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
+          <tr>
+            <th className="text-left px-3 py-2 w-28">Date</th>
+            <th className="text-left px-3 py-2 w-32">Ref</th>
+            <th className="text-left px-3 py-2 w-24">Source</th>
+            <th className="text-left px-3 py-2">{partyLabel}</th>
+            <th className="text-left px-3 py-2">Method</th>
+            <th className="text-right px-3 py-2 w-28">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={6} className="p-8 text-center text-slate-500">No {isReceipt ? "receipts" : "payments"} in this period.</td></tr>
+          ) : rows.map((r) => (
+            <tr key={r.id} className="border-t hover:bg-slate-50">
+              <td className="px-3 py-2 text-slate-600">{formatDate(r.date)}</td>
+              <td className="px-3 py-2 font-mono text-xs">{r.payment_no}</td>
+              <td className="px-3 py-2 capitalize text-xs text-slate-500">{r.source_type}</td>
+              <td className="px-3 py-2">{party(r)}</td>
+              <td className="px-3 py-2 text-slate-600">{nameOf.get(`m:${r.payment_method_id}`) || "—"}</td>
+              <td className="px-3 py-2 text-right tabular-nums font-medium">{formatMoney(r.amount, sym)}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-300 bg-slate-50 font-bold">
+            <td className="px-3 py-2.5" colSpan={5}>Total</td>
+            <td className="px-3 py-2.5 text-right tabular-nums">{formatMoney(total, sym)}</td>
+          </tr>
+        </tbody>
+      </table>
     </Card>
   );
 }

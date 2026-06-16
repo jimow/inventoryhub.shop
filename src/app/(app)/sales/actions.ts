@@ -27,12 +27,14 @@ export type SaleReceipt = {
 
 type Result = { ok: boolean; error?: string; receipt?: SaleReceipt };
 
-function readForm(formData: FormData, inclusive: boolean) {
+function readForm(formData: FormData, inclusive: boolean, settingsRate: number) {
   const itemsRaw = String(formData.get("items") || "[]");
   let items: SaleLine[] = [];
   try { items = JSON.parse(itemsRaw); } catch {}
   const discount = Number(formData.get("discount") || 0);
-  const tax_rate = Number(formData.get("tax_rate") || 0);
+  // The VAT rate is taken from Settings (single source of truth). Whether each
+  // line is taxed at all is decided per-item by its product's `taxable` flag.
+  const tax_rate = Number(settingsRate) || 0;
   // Honors Settings → Currency & Tax → "Prices are tax-inclusive" so what the
   // user types as the line price is what the customer pays (tax extracted).
   const { subtotal, tax, total } = computeLineTotals(items, discount, tax_rate, inclusive);
@@ -52,7 +54,7 @@ export async function createSale(formData: FormData): Promise<Result> {
   try {
     await requirePermission("sales", "create");
     const cfg = await getSettings();
-    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
     if (!payload.invoice_no) payload.invoice_no = await reserveNextNumber("nextInvoice", cfg.numbering?.invoicePrefix || "INV-");
     if (!payload.customer_id) return { ok: false, error: "Customer required" };
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
@@ -123,7 +125,7 @@ export async function updateSale(id: string, formData: FormData): Promise<Result
     if (!existing) return { ok: false, error: "Sale not found" };
     if (existing.status !== "draft") return { ok: false, error: "Only draft sales can be edited" };
     const cfg = await getSettings();
-    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
 
     // Re-check the credit limit on edit (the new total must still fit), using
@@ -520,4 +522,19 @@ export async function listSaleUnits(
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
+}
+
+/** Serial numbers captured for a sale, grouped by line index (for printing). */
+export async function getSaleSerials(saleId: string): Promise<Record<number, string[]>> {
+  const admin = createServiceClient();
+  const { data } = await admin
+    .from("inventory_units")
+    .select("serial_no, sale_line_idx")
+    .eq("sale_id", saleId);
+  const out: Record<number, string[]> = {};
+  for (const u of data || []) {
+    const i = Number(u.sale_line_idx ?? -1);
+    (out[i] ||= []).push(u.serial_no as string);
+  }
+  return out;
 }

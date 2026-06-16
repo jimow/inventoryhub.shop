@@ -25,6 +25,7 @@ import {
   Coins,
   Undo2,
   History,
+  FileText,
 } from "lucide-react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -50,6 +51,7 @@ const NAV: NavItem[] = [
   { href: "/customers",         label: "Customers",         module: "customers",  icon: UsersIcon,       section: "Contacts" },
   { href: "/suppliers",         label: "Suppliers",         module: "suppliers",  icon: Truck,           section: "Contacts" },
 
+  { href: "/quotations",        label: "Quotations",        module: "quotations", icon: FileText,        section: "Transactions" },
   { href: "/sales",             label: "Sales",             module: "sales",      icon: Receipt,         section: "Transactions" },
   { href: "/purchases",         label: "Purchases",         module: "purchases",  icon: ShoppingCart,    section: "Transactions" },
   { href: "/payments",          label: "Payments",          module: "payments",   icon: Wallet,          section: "Transactions" },

@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Users, Loader2, X, Pencil, Landmark, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+import { Plus, Users, Loader2, X, Pencil, Landmark, ArrowDownToLine, ArrowUpFromLine, Scale } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,11 +22,11 @@ import type { PermissionMatrix } from "@/lib/permissions";
 import { can } from "@/lib/permissions";
 import { ownershipPercents, type OwnershipMode } from "@/lib/equity";
 import { formatMoney, formatDate, currencySymbol } from "@/lib/utils";
-import { saveShareholder, deleteShareholder, recordContribution, cancelContribution } from "./actions";
+import { saveShareholder, deleteShareholder, recordContribution, cancelContribution, allocateOpeningBalances } from "./actions";
 
 export function EquityClient({
   shareholders, contributions, methods, settings,
-  contributedEquity, retainedEarnings, equityTotal, permissions,
+  contributedEquity, retainedEarnings, equityTotal, openingAvailable, permissions,
 }: {
   shareholders: Shareholder[];
   contributions: EquityContribution[];
@@ -35,11 +35,13 @@ export function EquityClient({
   contributedEquity: number;
   retainedEarnings: number;
   equityTotal: number;
+  openingAvailable: number;
   permissions: PermissionMatrix;
 }) {
   const sym = currencySymbol(settings);
   const [shDialog, setShDialog] = useState<{ open: boolean; edit: Shareholder | null }>({ open: false, edit: null });
   const [contribOpen, setContribOpen] = useState(false);
+  const [allocOpen, setAllocOpen] = useState(false);
 
   const canCreate = can(permissions, "equity", "create");
   const canEdit = can(permissions, "equity", "edit");
@@ -73,6 +75,10 @@ export function EquityClient({
           <>
             <Button size="sm" variant="outline" onClick={() => setShDialog({ open: true, edit: null })}>
               <Users className="h-4 w-4" /> Add shareholder
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setAllocOpen(true)} disabled={shareholders.length === 0}
+              title="Distribute opening-balance equity across shareholders">
+              <Scale className="h-4 w-4" /> Allocate opening balances
             </Button>
             <Button size="sm" onClick={() => setContribOpen(true)} disabled={shareholders.length === 0}>
               <Plus className="h-4 w-4" /> Record contribution
@@ -177,7 +183,144 @@ export function EquityClient({
       {contribOpen && (
         <ContributionDialog shareholders={shareholders.filter((s) => s.status === "active")} methods={methods} sym={sym} onClose={() => setContribOpen(false)} />
       )}
+      {allocOpen && (
+        <AllocateOpeningDialog
+          shareholders={shareholders.filter((s) => s.status === "active")}
+          pct={pct}
+          available={openingAvailable}
+          sym={sym}
+          onClose={() => setAllocOpen(false)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Flexible opening-balance allocator: enter any amount per shareholder (or use
+ * the split helpers). Each becomes an opening capital contribution. The total
+ * can be less than, equal to, or — with a confirmation — more than the equity
+ * currently sitting in Opening Balance Equity.
+ */
+function AllocateOpeningDialog({
+  shareholders, pct, available, sym, onClose,
+}: {
+  shareholders: Shareholder[];
+  pct: Map<string, number>;
+  available: number;
+  sym: string;
+  onClose: () => void;
+}) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [amounts, setAmounts] = useState<Record<string, number>>({});
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+
+  const total = Object.values(amounts).reduce((s, n) => s + (Number(n) || 0), 0);
+  const remaining = Math.round((available - total) * 100) / 100;
+
+  function set(id: string, v: number) {
+    setAmounts((prev) => ({ ...prev, [id]: v }));
+  }
+  function splitEqually() {
+    if (shareholders.length === 0) return;
+    const each = Math.floor((available / shareholders.length) * 100) / 100;
+    const next: Record<string, number> = {};
+    shareholders.forEach((s, i) => {
+      // Put any rounding remainder on the last shareholder so the split is exact.
+      next[s.id] = i === shareholders.length - 1
+        ? Math.round((available - each * (shareholders.length - 1)) * 100) / 100
+        : each;
+    });
+    setAmounts(next);
+  }
+  function splitByOwnership() {
+    const totalPct = shareholders.reduce((s, sh) => s + (pct.get(sh.id) || 0), 0);
+    if (totalPct <= 0) { toast.error("No ownership % set — use Settings or split equally"); return; }
+    const next: Record<string, number> = {};
+    for (const s of shareholders) next[s.id] = Math.round(available * ((pct.get(s.id) || 0) / totalPct) * 100) / 100;
+    setAmounts(next);
+  }
+  function clear() { setAmounts({}); }
+
+  function submit() {
+    const allocations = shareholders
+      .map((s) => ({ shareholder_id: s.id, amount: Number(amounts[s.id]) || 0 }))
+      .filter((a) => a.amount > 0);
+    if (!allocations.length) { toast.error("Enter at least one amount"); return; }
+    if (total > available + 0.01 && !confirm(
+      `You're allocating ${formatMoney(total, sym)} but only ${formatMoney(available, sym)} of opening equity is on the books. ` +
+      `This will push Opening Balance Equity negative. Continue anyway?`
+    )) return;
+    start(async () => {
+      const r = await allocateOpeningBalances(allocations, date);
+      if (!r.ok) { toast.error(r.error || "Failed"); return; }
+      toast.success(`Allocated to ${r.count ?? allocations.length} shareholder(s)`);
+      onClose(); router.refresh();
+    });
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Allocate opening balances</DialogTitle>
+          <DialogDescription>
+            Distribute opening-balance equity (account 3200) to shareholders as opening capital.
+            Posts Dr Opening Balance Equity · Cr Owner Equity per shareholder — no cash moves.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <div className="text-sm">
+            Available: <b className="tabular-nums">{formatMoney(available, sym)}</b>
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <Button type="button" size="sm" variant="outline" onClick={splitEqually}>Split equally</Button>
+            <Button type="button" size="sm" variant="outline" onClick={splitByOwnership}>By ownership %</Button>
+            <Button type="button" size="sm" variant="ghost" onClick={clear}>Clear</Button>
+          </div>
+        </div>
+
+        <div className="border rounded-md divide-y max-h-72 overflow-auto">
+          {shareholders.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 px-3 py-2">
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm truncate">{s.name}</div>
+                <div className="text-[11px] text-muted-foreground">{(pct.get(s.id) || 0).toFixed(2)}% ownership</div>
+              </div>
+              <Input
+                type="number" min="0" step="0.01"
+                value={amounts[s.id] ?? ""}
+                onChange={(e) => set(s.id, Number(e.target.value) || 0)}
+                placeholder="0.00"
+                className="h-8 w-36 text-right tabular-nums"
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between text-sm mt-1">
+          <div>
+            <Label htmlFor="alloc_date" className="mr-2">Date</Label>
+            <Input id="alloc_date" type="date" value={date} onChange={(e) => setDate(e.target.value)} className="h-8 w-40 inline-block" />
+          </div>
+          <div className="text-right">
+            <div>Allocated: <b className="tabular-nums">{formatMoney(total, sym)}</b></div>
+            <div className={`text-xs ${remaining < 0 ? "text-red-600" : "text-muted-foreground"}`}>
+              Remaining: <span className="tabular-nums">{formatMoney(remaining, sym)}</span>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose} disabled={pending}>Cancel</Button>
+          <Button type="button" onClick={submit} disabled={pending || total <= 0}>
+            {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Allocate {formatMoney(total, sym)}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

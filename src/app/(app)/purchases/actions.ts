@@ -11,12 +11,13 @@ import type { Purchase, PurchaseLine, PurchaseType } from "@/lib/types";
 
 type Result = { ok: boolean; error?: string };
 
-function readForm(formData: FormData, inclusive: boolean) {
+function readForm(formData: FormData, inclusive: boolean, settingsRate: number) {
   const itemsRaw = String(formData.get("items") || "[]");
   let items: PurchaseLine[] = [];
   try { items = JSON.parse(itemsRaw); } catch {}
   const discount = Number(formData.get("discount") || 0);
-  const tax_rate = Number(formData.get("tax_rate") || 0);
+  // VAT rate from Settings; per-item taxable flag decides what's taxed.
+  const tax_rate = Number(settingsRate) || 0;
   // Honor Settings → Currency & Tax → "Prices are tax-inclusive" so supplier
   // invoice grand totals match what was on their paper.
   const { subtotal, tax, total } = computeLineTotals(items, discount, tax_rate, inclusive);
@@ -46,7 +47,7 @@ export async function createPurchase(formData: FormData): Promise<Result & { pur
   try {
     await requirePermission("purchases", "create");
     const cfg = await getSettings();
-    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
     if (!payload.po_no) payload.po_no = await reserveNextNumber("nextPO", cfg.numbering?.poPrefix || "PO-");
     if (!payload.supplier_id) return { ok: false, error: "Supplier required" };
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
@@ -76,7 +77,7 @@ export async function createCashPurchase(
   try {
     await requirePermission("purchases", "create");
     const cfg = await getSettings();
-    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
     payload.purchase_type = "cash"; // force cash
     payload.due_date = null;
     if (!payload.po_no) payload.po_no = await reserveNextNumber("nextPO", cfg.numbering?.poPrefix || "PO-");
@@ -109,6 +110,46 @@ export async function createCashPurchase(
   } catch (e) { return { ok: false, error: (e as Error).message }; }
 }
 
+/**
+ * Credit purchase that's received NOW: increases stock and posts
+ * Dr Inventory / Cr Accounts Payable immediately (no payment). The balance is
+ * carried as A/P. Use this when the goods have arrived but aren't paid yet.
+ */
+export async function createCreditPurchase(
+  formData: FormData,
+  serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
+): Promise<Result> {
+  try {
+    await requirePermission("purchases", "create");
+    const cfg = await getSettings();
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
+    payload.purchase_type = "credit";
+    if (!payload.po_no) payload.po_no = await reserveNextNumber("nextPO", cfg.numbering?.poPrefix || "PO-");
+    if (!payload.supplier_id) return { ok: false, error: "Supplier required" };
+    if (!payload.items.length) return { ok: false, error: "Add at least one line" };
+
+    const supabase = await createClient();
+    const { data: created, error } = await supabase
+      .from("purchases")
+      .insert({ ...payload, status: "ordered", amount_paid: 0 })
+      .select("id")
+      .single();
+    if (error || !created) return { ok: false, error: error?.message || "Failed to create purchase" };
+
+    // Receive with NO payment → stock up + A/P up, balance owed to supplier.
+    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, 0, null);
+    if (!r.ok) {
+      await supabase.from("purchases").delete().eq("id", created.id);
+      return r;
+    }
+    revalidatePath("/purchases");
+    revalidatePath("/payments");
+    revalidatePath("/products");
+    revalidatePath("/dashboard");
+    return { ok: true };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
 export async function updatePurchase(id: string, formData: FormData): Promise<Result> {
   try {
     await requirePermission("purchases", "edit");
@@ -117,7 +158,7 @@ export async function updatePurchase(id: string, formData: FormData): Promise<Re
     if (!existing) return { ok: false, error: "Purchase not found" };
     if (existing.status !== "draft") return { ok: false, error: "Only draft purchases can be edited" };
     const cfg = await getSettings();
-    const payload = readForm(formData, !!cfg.tax?.inclusive);
+    const payload = readForm(formData, !!cfg.tax?.inclusive, Number(cfg.tax?.defaultRate || 0));
     if (!payload.items.length) return { ok: false, error: "Add at least one line" };
     const { error } = await supabase.from("purchases").update(payload).eq("id", id);
     if (error) return { ok: false, error: error.message };
@@ -514,4 +555,19 @@ export async function exportPurchases(
     ]);
     return { ok: true, csv, filename: `purchases-${new Date().toISOString().slice(0, 10)}.csv` };
   } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
+/** Serial numbers captured for a purchase, grouped by line index (for printing). */
+export async function getPurchaseSerials(purchaseId: string): Promise<Record<number, string[]>> {
+  const admin = createServiceClient();
+  const { data } = await admin
+    .from("inventory_units")
+    .select("serial_no, purchase_line_idx")
+    .eq("purchase_id", purchaseId);
+  const out: Record<number, string[]> = {};
+  for (const u of data || []) {
+    const i = Number(u.purchase_line_idx ?? -1);
+    (out[i] ||= []).push(u.serial_no as string);
+  }
+  return out;
 }

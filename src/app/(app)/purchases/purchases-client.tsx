@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { Fragment, useEffect, useMemo, useState, useTransition } from "react";
 import Link from "next/link";
@@ -27,7 +27,7 @@ import type { PermissionMatrix } from "@/lib/permissions";
 import { can } from "@/lib/permissions";
 import { formatMoney, formatDate, formatDateTime, currencySymbol, computeLineTotals } from "@/lib/utils";
 import {
-  createPurchase, createCashPurchase, updatePurchase, deletePurchase,
+  createPurchase, createCashPurchase, createCreditPurchase, updatePurchase, deletePurchase, getPurchaseSerials,
   markOrdered, receivePurchase, cancelPurchase, recordPurchasePayment,
   bulkCancelPurchases, bulkDeletePurchases, exportPurchases,
 } from "./actions";
@@ -73,7 +73,7 @@ export function PurchasesClient({
   const [viewReturns, setViewReturns] = useState<PurchaseReturn[] | null>(null);
   const sym = currencySymbol(settings);
 
-  // Deep-link: /purchases?new=1[&supplier_id=â€¦] opens the New Purchase editor
+  // Deep-link: /purchases?new=1[&supplier_id=…] opens the New Purchase editor
   // (used by the "New purchase" action on the supplier list).
   const prefillSupplier = sp.get("supplier_id") || "";
   useEffect(() => {
@@ -92,7 +92,7 @@ export function PurchasesClient({
     { key: "supplier", label: "Supplier",
       render: (r) => {
         const s = suppliers.find((x) => x.id === r.supplier_id);
-        return s ? <Link href={`/suppliers/${s.id}`} className="font-medium text-blue-600 hover:underline">{s.name}</Link> : <span className="text-slate-400">â€”</span>;
+        return s ? <Link href={`/suppliers/${s.id}`} className="font-medium text-blue-600 hover:underline">{s.name}</Link> : <span className="text-slate-400">—</span>;
       } },
     { key: "purchase_type", label: "Type", className: "w-[90px]",
       render: (r) => <TypeBadge type={r.purchase_type} /> },
@@ -101,7 +101,7 @@ export function PurchasesClient({
     { key: "balance", label: "Balance", className: "w-[120px] text-right",
       render: (r) => {
         const bal = Number(r.total) - Number(r.amount_paid || 0);
-        if (r.status === "cancelled") return <span className="text-muted-foreground">â€”</span>;
+        if (r.status === "cancelled") return <span className="text-muted-foreground">—</span>;
         if (bal <= 0.001) return <span className="text-emerald-700">Paid</span>;
         return <span className={isOverdue(r) ? "text-red-600 font-medium" : ""}>{formatMoney(bal, sym)}</span>;
       } },
@@ -315,7 +315,7 @@ function PaymentDialog({ po, settings, onClose }: { po: Purchase; settings: Sett
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Record Payment â€” {po.po_no}</DialogTitle>
+          <DialogTitle>Record Payment — {po.po_no}</DialogTitle>
           <DialogDescription>Outstanding balance: <b>{formatMoney(balance, sym)}</b></DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-3">
@@ -342,6 +342,8 @@ function PurchaseViewer({ purchase, suppliers, settings, onClose }: { purchase: 
   const sup = suppliers.find((s) => s.id === purchase.supplier_id);
   const sym = currencySymbol(settings);
   const balance = Number(purchase.total) - Number(purchase.amount_paid || 0);
+  const [serials, setSerials] = useState<Record<number, string[]>>({});
+  useEffect(() => { getPurchaseSerials(purchase.id).then(setSerials).catch(() => {}); }, [purchase.id]);
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl">
@@ -349,7 +351,7 @@ function PurchaseViewer({ purchase, suppliers, settings, onClose }: { purchase: 
           <DialogTitle className="flex items-center gap-2">
             Purchase {purchase.po_no} <TypeBadge type={purchase.purchase_type} /> <StatusBadge po={purchase} />
           </DialogTitle>
-          <DialogDescription>{formatDate(purchase.date)} {purchase.due_date && `Â· due ${formatDate(purchase.due_date)}`}</DialogDescription>
+          <DialogDescription>{formatDate(purchase.date)} {purchase.due_date && `· due ${formatDate(purchase.due_date)}`}</DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3 text-sm mb-3">
           <div><b>Supplier:</b> {sup?.name || "-"}</div>
@@ -367,8 +369,11 @@ function PurchaseViewer({ purchase, suppliers, settings, onClose }: { purchase: 
           <tbody>
             {(purchase.items || []).map((l, i) => (
               <tr key={i} className="border-t">
-                <td className="p-2">{l.name}</td>
-                <td className="p-2 text-right">{l.qty}</td>
+                <td className="p-2 align-top">
+                  {l.name}
+                  {serials[i]?.length ? <div className="text-xs text-slate-500 mt-0.5">S/N: {serials[i].join(", ")}</div> : null}
+                </td>
+                <td className="p-2 text-right align-top">{l.qty}</td>
                 <td className="p-2 text-right">{formatMoney(l.price, sym)}</td>
                 <td className="p-2 text-right">{formatMoney(Number(l.qty) * Number(l.price), sym)}</td>
               </tr>
@@ -419,7 +424,8 @@ function PurchaseEditor({
   const sym = currencySymbol(settings);
   const [lines, setLines] = useState<PurchaseLine[]>(purchase?.items || []);
   const [discount, setDiscount] = useState(Number(purchase?.discount ?? 0));
-  const [taxRate, setTaxRate] = useState(Number(purchase?.tax_rate ?? settings.tax?.defaultRate ?? 0));
+  // VAT rate comes solely from Settings; per-item `taxable` decides what's taxed.
+  const taxRate = Number(settings.tax?.defaultRate ?? 0);
   const [transportCost, setTransportCost] = useState(Number(purchase?.transport_cost ?? 0));
   const [otherCharges, setOtherCharges] = useState(Number(purchase?.other_charges ?? 0));
   const [purchaseType, setPurchaseType] = useState<PurchaseType>(purchase?.purchase_type || "cash");
@@ -428,6 +434,10 @@ function PurchaseEditor({
 
   // Cash purchases capture serials + payment inline (one dialog, no process).
   const isNewCash = !purchase && purchaseType === "cash";
+  // Credit purchases can be "received now" → stock + A/P update immediately.
+  const isNewCredit = !purchase && purchaseType === "credit";
+  const [receiveNow, setReceiveNow] = useState(true);
+  const receiveCredit = isNewCredit && receiveNow;
   const [serials, setSerials] = useState<Record<string, { serial: string; barcode: string }[]>>({});
   const [methodId, setMethodId] = useState<string>(methods.find((m) => m.kind === "cash")?.id || methods[0]?.id || "");
   const [paid, setPaid] = useState<number>(0);
@@ -450,9 +460,14 @@ function PurchaseEditor({
   // Honor the tax-inclusive setting so line prices match the supplier invoice
   // grand total instead of double-taxing.
   const taxInclusive = !!settings.tax?.inclusive;
+  // Resolve each line's taxable flag from the live product so a non-taxable
+  // product NEVER contributes tax — regardless of how the line was added.
+  const taxableOf = (refId: string) => products.find((p) => p.id === refId)?.taxable !== false;
+  const withTaxable = <T extends { refId: string }>(ls: T[]) => ls.map((l) => ({ ...l, taxable: taxableOf(l.refId) }));
   const totals = useMemo(
-    () => computeLineTotals(lines, discount, taxRate, taxInclusive),
-    [lines, discount, taxRate, taxInclusive],
+    () => computeLineTotals(withTaxable(lines), discount, taxRate, taxInclusive),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lines, discount, taxRate, taxInclusive, products],
   );
   const lineCharges = lines.reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
   const grandTotal = totals.total + (Number(transportCost) || 0) + (Number(otherCharges) || 0) + lineCharges;
@@ -490,6 +505,7 @@ function PurchaseEditor({
       name: it.name,
       qty: Number(next[index].qty) || 1,
       price: Number(it.cost_price),
+      taxable: it.taxable !== false,
     };
     setLines(next);
   }
@@ -528,12 +544,12 @@ function PurchaseEditor({
     if (!filled.length) { toast.error("Add at least one item line"); return; }
     if (!supplierId) { toast.error("Select a supplier"); return; }
     const fd = new FormData(e.currentTarget);
-    fd.set("items", JSON.stringify(filled));
+    fd.set("items", JSON.stringify(withTaxable(filled)));
     fd.set("supplier_id", supplierId);
 
-    // CASH (new): create + receive + pay in this one dialog. Validate serials
-    // (one per unit, count = qty, non-blank, unique) and build the payload.
-    if (isNewCash) {
+    // Validate + build serials (one per unit, count = qty, non-blank, unique).
+    // Returns null if invalid (after showing a toast). Used by cash + credit-now.
+    function buildSerials(): Record<number, { serial: string; barcode?: string }[]> | null {
       const serialsByLine: Record<number, { serial: string; barcode?: string }[]> = {};
       for (let i = 0; i < filled.length; i++) {
         const l = filled[i];
@@ -544,16 +560,36 @@ function PurchaseEditor({
         const seen = new Set<string>();
         for (let u = 0; u < qty; u++) {
           const s = (units[u]?.serial || "").trim();
-          if (!s) { toast.error(`${l.name}: serial #${u + 1} of ${qty} is required`); return; }
-          if (seen.has(s)) { toast.error(`${l.name}: duplicate serial "${s}"`); return; }
+          if (!s) { toast.error(`${l.name}: serial #${u + 1} of ${qty} is required`); return null; }
+          if (seen.has(s)) { toast.error(`${l.name}: duplicate serial "${s}"`); return null; }
           seen.add(s);
         }
         serialsByLine[i] = units.slice(0, qty).map((u) => ({ serial: u.serial.trim(), barcode: u.barcode.trim() || undefined }));
       }
+      return serialsByLine;
+    }
+
+    // CASH (new): create + receive + pay in this one dialog.
+    if (isNewCash) {
+      const serialsByLine = buildSerials();
+      if (!serialsByLine) return;
       start(async () => {
         const r = await createCashPurchase(fd, serialsByLine, paid, methodId || null);
         if (!r.ok) { toast.error(r.error || "Save failed"); return; }
-        toast.success(paidPartial ? "Cash purchase received â€” balance recorded" : "Cash purchase received & paid");
+        toast.success(paidPartial ? "Cash purchase received — balance recorded" : "Cash purchase received & paid");
+        onClose(); router.refresh();
+      });
+      return;
+    }
+
+    // CREDIT received now: create + receive (stock up, A/P up), no payment.
+    if (receiveCredit) {
+      const serialsByLine = buildSerials();
+      if (!serialsByLine) return;
+      start(async () => {
+        const r = await createCreditPurchase(fd, serialsByLine);
+        if (!r.ok) { toast.error(r.error || "Save failed"); return; }
+        toast.success("Credit purchase received — stock updated, balance owed to supplier");
         onClose(); router.refresh();
       });
       return;
@@ -576,7 +612,7 @@ function PurchaseEditor({
   const productOptions: ComboboxOption[] = products.map((it) => ({
     value: it.id,
     label: it.name,
-    sub: `${it.code} Â· ${formatMoney(it.cost_price, sym)} Â· Stock: ${it.current_stock} ${it.unit}`,
+    sub: `${it.code} · ${formatMoney(it.cost_price, sym)} · Stock: ${it.current_stock} ${it.unit}`,
   }));
 
   const supplierOptions: ComboboxOption[] = suppliers.map((s) => ({
@@ -629,7 +665,7 @@ function PurchaseEditor({
                 value=""
                 onChange={addProductById}
                 options={productOptions}
-                placeholder="ðŸ”  Search an item by name or code, then press Enter to add itâ€¦"
+                placeholder="  Search an item by name or code, then press Enter to add it…"
                 emptyText="No items match"
               />
               {quickAddProducts.length > 0 && (
@@ -641,7 +677,7 @@ function PurchaseEditor({
                     >
                       <span className="font-medium text-slate-800">{p.name}</span>
                       <span className="ml-1.5 text-slate-400 tabular-nums">{formatMoney(p.cost_price, sym)}</span>
-                      <span className="ml-1.5 text-[10px] text-slate-400 tabular-nums">Â· stk {p.current_stock}</span>
+                      <span className="ml-1.5 text-[10px] text-slate-400 tabular-nums">· stk {p.current_stock}</span>
                     </button>
                   ))}
                 </div>
@@ -670,13 +706,13 @@ function PurchaseEditor({
                       />
                       {prod && (
                         <div className="mt-0.5 text-[11px] text-slate-400 tabular-nums">
-                          {prod.code} Â· Stock: {prod.current_stock} {prod.unit}
+                          {prod.code} · Stock: {prod.current_stock} {prod.unit}
                         </div>
                       )}
                     </div>
                     <div className="col-span-2 flex items-center gap-1">
                       <button type="button" title="Decrease" onClick={() => setQty(i, Number(l.qty) - 1)}
-                        className="h-8 w-6 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100">âˆ’</button>
+                        className="h-8 w-6 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100">−</button>
                       <PurchaseQtyInput value={Number(l.qty)} onCommit={(n) => setQty(i, n)} />
                       <button type="button" title="Increase" onClick={() => setQty(i, Number(l.qty) + 1)}
                         className="h-8 w-6 shrink-0 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100">+</button>
@@ -706,8 +742,8 @@ function PurchaseEditor({
             </div>
           </div>
 
-          {/* CASH only: serial numbers â€” one per unit, must equal the quantity */}
-          {isNewCash && serialLines.length > 0 && (
+          {/* Received-now (cash or credit): serials — one per unit, equal to qty */}
+          {(isNewCash || receiveCredit) && serialLines.length > 0 && (
             <div className="col-span-12">
               <Label className="block mb-1">Serial numbers</Label>
               <div className="space-y-3">
@@ -718,7 +754,7 @@ function PurchaseEditor({
                   return (
                     <div key={l.refId} className="border rounded-md p-3">
                       <div className="flex items-baseline justify-between mb-2">
-                        <div className="font-medium text-slate-900">{l.name} <span className="text-xs text-slate-500">Â· qty {qty}</span></div>
+                        <div className="font-medium text-slate-900">{l.name} <span className="text-xs text-slate-500">· qty {qty}</span></div>
                         <Badge variant={done === qty ? "success" : "warning"}>{done}/{qty} entered</Badge>
                       </div>
                       <div className="grid grid-cols-12 gap-2 text-xs">
@@ -751,17 +787,17 @@ function PurchaseEditor({
               <span>Discount</span>
               <Input className="h-7 w-24" type="number" step="0.01" min="0" name="discount" value={discount} onChange={(e) => setDiscount(Number(e.target.value) || 0)} />
             </div>
-            <div className="flex justify-between items-center gap-2">
-              <span>Tax %</span>
-              <Input className="h-7 w-24" type="number" step="0.01" min="0" name="tax_rate" value={taxRate} onChange={(e) => setTaxRate(Number(e.target.value) || 0)} />
+            <input type="hidden" name="tax_rate" value={taxRate} />
+            <div className="flex justify-between">
+              <span className="text-xs text-slate-500">Tax ({taxRate}% — from Settings, taxable items)</span>
+              <span>{formatMoney(totals.tax, sym)}</span>
             </div>
-            <div className="flex justify-between"><span>Tax</span><span>{formatMoney(totals.tax, sym)}</span></div>
             <div className="flex justify-between items-center gap-2">
-              <span title="Freight in â€” added to inventory cost">Transport</span>
+              <span title="Freight in — added to inventory cost">Transport</span>
               <Input className="h-7 w-24" type="number" step="0.01" min="0" name="transport_cost" value={transportCost} onChange={(e) => setTransportCost(Number(e.target.value) || 0)} />
             </div>
             <div className="flex justify-between items-center gap-2">
-              <span title="Handling, clearing, etc. â€” added to inventory cost">Other charges</span>
+              <span title="Handling, clearing, etc. — added to inventory cost">Other charges</span>
               <Input className="h-7 w-24" type="number" step="0.01" min="0" name="other_charges" value={otherCharges} onChange={(e) => setOtherCharges(Number(e.target.value) || 0)} />
             </div>
             <div className="flex justify-between font-semibold pt-2 border-t border-slate-300">
@@ -771,13 +807,21 @@ function PurchaseEditor({
               <p className="text-[11px] text-muted-foreground">Charges are capitalized into item cost on receive.</p>
             )}
 
+            {/* CREDIT: receive goods immediately (stock + A/P) vs. save a draft PO */}
+            {isNewCredit && (
+              <label className="flex items-center justify-between gap-2 pt-2.5 mt-2.5 border-t-2 border-dashed border-slate-300 cursor-pointer">
+                <span className="text-slate-600 text-xs">Goods received now <span className="text-slate-400">(update stock &amp; A/P; balance owed)</span></span>
+                <input type="checkbox" checked={receiveNow} onChange={(e) => setReceiveNow(e.target.checked)} />
+              </label>
+            )}
+
             {/* CASH only: pay the supplier now; any shortfall is a balance owed */}
             {isNewCash && (
               <div className="border-t-2 border-dashed border-slate-300 pt-2.5 mt-2.5 space-y-2">
                 <div className="flex justify-between items-center gap-2">
                   <span className="text-slate-600">Pay from</span>
                   <Select className="h-8 w-32" value={methodId} onChange={(e) => setMethodId(e.target.value)}>
-                    {methods.length === 0 && <option value="">â€” Cash drawer â€”</option>}
+                    {methods.length === 0 && <option value="">— Cash drawer —</option>}
                     {methods.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </Select>
                 </div>
@@ -798,7 +842,7 @@ function PurchaseEditor({
             <DialogFooter>
               <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
               <Button type="submit" disabled={pending}>
-                {pending ? "Saving..." : isNewCash ? `Receive & Pay ${formatMoney(grandTotal, sym)}` : (purchase ? "Save changes" : "Save order")}
+                {pending ? "Saving..." : isNewCash ? `Receive & Pay ${formatMoney(grandTotal, sym)}` : receiveCredit ? `Receive on credit (owe ${formatMoney(grandTotal, sym)})` : (purchase ? "Save changes" : "Save order")}
               </Button>
             </DialogFooter>
           </div>
@@ -893,7 +937,7 @@ function ReceiveDialog({
             {anySerialTracked
               ? `Enter a serial number for each unit (must match the quantity)${isCash ? ", then confirm payment" : ""}.`
               : isCash
-                ? "Confirm what you paid the supplier â€” any shortfall is kept as a balance owed."
+                ? "Confirm what you paid the supplier — any shortfall is kept as a balance owed."
                 : "Confirm receipt - stock levels will be updated."}
           </DialogDescription>
         </DialogHeader>
@@ -946,7 +990,7 @@ function ReceiveDialog({
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="pay_from" className="m-0">Pay from</Label>
               <Select id="pay_from" className="h-9 w-48" value={methodId} onChange={(e) => setMethodId(e.target.value)}>
-                {methods.length === 0 && <option value="">â€” Cash drawer â€”</option>}
+                {methods.length === 0 && <option value="">— Cash drawer —</option>}
                 {methods.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
               </Select>
             </div>
@@ -1006,24 +1050,31 @@ function PurchaseQtyInput({ value, onCommit }: { value: number; onCommit: (n: nu
 }
 
 /** Open a printable, full-page A4 purchase order (header, supplier, lines, totals). */
-function printPurchaseOrder(po: Purchase, supplier: Supplier | undefined, settings: SettingsData) {
+async function printPurchaseOrder(po: Purchase, supplier: Supplier | undefined, settings: SettingsData) {
   if (typeof window === "undefined") return;
   const sym = currencySymbol(settings);
   const win = window.open("", "_blank", "width=820,height=920");
-  if (!win) { toast.error("Pop-up blocked â€” allow pop-ups to print the PO"); return; }
+  if (!win) { toast.error("Pop-up blocked — allow pop-ups to print the PO"); return; }
+  win.document.write("<!doctype html><body style='font:14px system-ui;padding:40px;color:#475569'>Preparing purchase order…</body>");
+  let serials: Record<number, string[]> = {};
+  try { serials = await getPurchaseSerials(po.id); } catch { /* serials optional */ }
   const m = (v: number) => escapeHtml(formatMoney(v, sym));
   const company = settings.company?.name || "Purchase Order";
   const balance = Math.max(0, Number(po.total) - Number(po.amount_paid || 0));
   const taxName = settings.tax?.name || "Tax";
   const charges = Number(po.transport_cost || 0) + Number(po.other_charges || 0);
-  const rows = (po.items || []).map((l, i) => `
+  const rows = (po.items || []).map((l, i) => {
+    const sn = serials[i]?.length
+      ? `<div style="font-size:11px;color:#64748b;margin-top:2px">S/N: ${serials[i].map(escapeHtml).join(", ")}</div>` : "";
+    return `
     <tr>
       <td style="padding:6px 8px;border-bottom:1px solid #eee;color:#64748b">${i + 1}</td>
-      <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtml(l.name)}</td>
+      <td style="padding:6px 8px;border-bottom:1px solid #eee">${escapeHtml(l.name)}${sn}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${l.qty}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${m(l.price)}</td>
       <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right">${m(Number(l.qty) * Number(l.price))}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   const html = `<!doctype html><html><head><title>PO ${escapeHtml(po.po_no)}</title>
     <style>
       *{box-sizing:border-box} body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;color:#0f172a;padding:32px;max-width:780px;margin:0 auto}
@@ -1051,7 +1102,7 @@ function printPurchaseOrder(po: Purchase, supplier: Supplier | undefined, settin
       </div>
     </div>
     <div class="muted" style="text-transform:uppercase;font-size:10px;letter-spacing:.06em">Supplier</div>
-    <div style="font-weight:600;font-size:15px">${escapeHtml(supplier?.name || "â€”")}</div>
+    <div style="font-weight:600;font-size:15px">${escapeHtml(supplier?.name || "—")}</div>
     ${supplier?.email ? `<div class="muted">${escapeHtml(supplier.email)}</div>` : ""}
     ${supplier?.phone ? `<div class="muted">${escapeHtml(supplier.phone)}</div>` : ""}
     <table>
@@ -1070,6 +1121,7 @@ function printPurchaseOrder(po: Purchase, supplier: Supplier | undefined, settin
     <div class="footer">Generated by ${escapeHtml(company)}</div>
     <script>window.onload = () => { window.print(); };</script>
     </body></html>`;
+  win.document.open();
   win.document.write(html);
   win.document.close();
 }

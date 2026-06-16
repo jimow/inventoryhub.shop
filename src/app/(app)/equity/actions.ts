@@ -132,6 +132,69 @@ export async function recordContribution(formData: FormData): Promise<Result> {
   } catch (e) { return { ok: false, error: (e as Error).message }; }
 }
 
+/**
+ * Flexibly allocate opening-balance equity across shareholders. Each entry is a
+ * separate opening contribution (Dr Opening Balance Equity 3200 / Cr Owner
+ * Equity 3000) for an arbitrary amount the operator decides — so opening
+ * capital can be split however the business needs, not just equally or by %.
+ * No cash moves; this reclassifies equity already on the books.
+ */
+export async function allocateOpeningBalances(
+  allocations: { shareholder_id: string; amount: number }[],
+  date?: string,
+): Promise<Result & { count?: number }> {
+  try {
+    await requirePermission("equity", "create");
+    const clean = (allocations || [])
+      .map((a) => ({ shareholder_id: String(a.shareholder_id || ""), amount: Math.round((Number(a.amount) || 0) * 100) / 100 }))
+      .filter((a) => a.shareholder_id && a.amount > 0);
+    if (!clean.length) return { ok: false, error: "Enter at least one amount" };
+
+    const admin = createServiceClient();
+    await ensureChartOfAccounts(admin);
+    const when = date || new Date().toISOString().slice(0, 10);
+    const { userId } = await getCurrentSession();
+
+    let count = 0;
+    for (const a of clean) {
+      const { data: sh } = await admin.from("shareholders").select("name").eq("id", a.shareholder_id).single();
+      if (!sh) return { ok: false, error: "Shareholder not found" };
+
+      const contribution_no = await reserveNextNumber("nextEquity", "EQ-");
+      const { data: row, error: insErr } = await admin.from("equity_contributions").insert({
+        contribution_no, shareholder_id: a.shareholder_id, date: when,
+        kind: "contribution", amount: a.amount, source: "opening",
+        payment_method_id: null, status: "posted",
+        notes: "Opening balance allocation", created_by: userId,
+      }).select("id").single();
+      if (insErr || !row) return { ok: false, error: insErr?.message || "Failed to record allocation" };
+
+      const desc = `Opening capital — ${sh.name}`;
+      const j = await postJournal({
+        date: when,
+        description: `Opening capital ${contribution_no} — ${sh.name}`,
+        source_type: "manual",
+        source_id: row.id,
+        lines: [
+          { account_code: OPENING_BALANCE_EQUITY, debit: a.amount, description: desc },
+          { account_code: OWNER_EQUITY, credit: a.amount, description: desc },
+        ],
+      });
+      if (!j.ok) {
+        await admin.from("equity_contributions").delete().eq("id", row.id);
+        return { ok: false, error: `Journal failed: ${j.error}` };
+      }
+      await admin.from("equity_contributions").update({ journal_entry_id: j.entry_id ?? null }).eq("id", row.id);
+      count++;
+    }
+
+    revalidatePath("/equity");
+    revalidatePath("/journal");
+    revalidatePath("/reports");
+    return { ok: true, count };
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
+}
+
 export async function cancelContribution(id: string): Promise<Result> {
   try {
     await requirePermission("equity", "edit");

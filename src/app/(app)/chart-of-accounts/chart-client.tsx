@@ -24,7 +24,7 @@ import { can } from "@/lib/permissions";
 import { formatMoney } from "@/lib/utils";
 import { createAccount, updateAccount, deleteAccount } from "./actions";
 
-type Row = Account & { balance: number };
+type Row = Account & { balance: number; inTotal: number; outTotal: number };
 
 const TYPE_COLOR: Record<AccountType, "info" | "warning" | "success" | "secondary" | "danger"> = {
   asset: "info", liability: "warning", equity: "secondary", income: "success", expense: "danger",
@@ -36,19 +36,25 @@ export function ChartOfAccountsClient({
   const [editing, setEditing] = useState<Row | null>(null);
   const [adding, setAdding] = useState(false);
 
+  // Account links open the in/out movement ledger in a NEW TAB so the user can
+  // drill into an account without losing their place in the chart.
   const columns: Column<Row>[] = [
-    { key: "code", label: "Code", className: "w-[100px] font-mono font-medium" },
-    { key: "name", label: "Name" },
+    { key: "code", label: "Code", className: "w-[100px]",
+      render: (r) => <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="font-mono font-medium text-blue-600 hover:underline">{r.code}</Link> },
+    { key: "name", label: "Name",
+      render: (r) => <Link href={`/chart-of-accounts/${r.id}`} target="_blank" className="text-blue-600 hover:underline">{r.name}</Link> },
     { key: "type", label: "Type", className: "w-[110px]",
       render: (r) => <Badge variant={TYPE_COLOR[r.type] || "secondary"}>{r.type}</Badge> },
+    { key: "inTotal", label: "In", className: "w-[120px] text-right",
+      render: (r) => r.inTotal ? <span className="text-emerald-700 tabular-nums">{formatMoney(r.inTotal)}</span> : <span className="text-slate-300">—</span> },
+    { key: "outTotal", label: "Out", className: "w-[120px] text-right",
+      render: (r) => r.outTotal ? <span className="text-red-600 tabular-nums">{formatMoney(r.outTotal)}</span> : <span className="text-slate-300">—</span> },
     { key: "balance", label: "Balance", className: "w-[140px] text-right",
       render: (r) => {
         const isCredit = r.type === "liability" || r.type === "equity" || r.type === "income";
         const display = isCredit ? -r.balance : r.balance;
-        return <span className={display < 0 ? "text-red-600" : "text-slate-900"}>{formatMoney(display)}</span>;
+        return <span className={display < 0 ? "text-red-600 tabular-nums" : "text-slate-900 tabular-nums"}>{formatMoney(display)}</span>;
       } },
-    { key: "is_system", label: "System", className: "w-[90px]",
-      render: (r) => r.is_system ? <Badge variant="secondary">System</Badge> : "" },
     { key: "is_active", label: "Status", className: "w-[90px]",
       render: (r) => <Badge variant={r.is_active ? "success" : "secondary"}>{r.is_active ? "Active" : "Inactive"}</Badge> },
   ];

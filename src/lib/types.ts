@@ -148,6 +148,8 @@ export type SaleLine = {
   name: string;
   qty: number;
   price: number;
+  /** Whether this line's product is taxable (false ⇒ no tax on this line). */
+  taxable?: boolean;
   /** For serial_tracked products: which inventory_units are being sold. Length must equal qty. */
   unit_ids?: string[];
 };
@@ -172,11 +174,37 @@ export type Sale = {
   created_by: string | null;
 };
 
+/** A quotation line is identical in shape to a sale line. */
+export type QuotationLine = SaleLine;
+
+export type QuotationStatus = "draft" | "sent" | "accepted" | "converted" | "rejected" | "expired";
+
+export type Quotation = {
+  id: string;
+  quote_no: string;
+  date: string;
+  valid_until: string | null;
+  customer_id: string | null;
+  items: QuotationLine[];
+  subtotal: number;
+  discount: number;
+  tax_rate: number;
+  tax: number;
+  total: number;
+  status: QuotationStatus;
+  converted_sale_id: string | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
+};
+
 export type PurchaseLine = {
   refId: string;
   name: string;
   qty: number;
   price: number;
+  /** Whether this line's product is taxable (false ⇒ no tax on this line). */
+  taxable?: boolean;
   /** Optional per-item landed charge (freight/handling for this line). */
   charge?: number;
 };
@@ -321,6 +349,8 @@ export type SettingsData = {
     nextDividend?: number;
     nextSalesReturn?: number;
     nextPurchaseReturn?: number;
+    nextQuotation?: number;
+    quotePrefix?: string;
   };
   productCategories: string[];
   units: string[];

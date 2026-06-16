@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/sidebar";
 import { Topbar } from "@/components/topbar";
+import { RelatedLinks } from "@/components/related-links";
 import { NavProgress } from "@/components/nav-progress";
 import { MobileNavProvider } from "@/components/mobile-nav";
 import { getCurrentSession } from "@/lib/auth";
@@ -89,7 +90,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </span>
             </div>
           )}
-          <div className="p-6">{children}</div>
+          <div className="p-6">
+            <RelatedLinks />
+            {children}
+          </div>
         </main>
       </div>
       </MobileNavProvider>

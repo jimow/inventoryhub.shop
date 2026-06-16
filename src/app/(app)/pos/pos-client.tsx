@@ -70,7 +70,8 @@ export function PosClient({
   const [activeCategory, setActiveCategory] = useState<string>("All");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [discount, setDiscount] = useState(0);
-  const [taxRate, setTaxRate] = useState(defaultTax);
+  // VAT rate comes solely from Settings; per-item `taxable` decides what's taxed.
+  const taxRate = defaultTax;
   const [customerId, setCustomerId] = useState<string>("");
   const [payOpen, setPayOpen] = useState(false);
   const [receipt, setReceipt] = useState<LastReceipt | null>(null);
@@ -119,9 +120,15 @@ export function PosClient({
   // drawer charges the customer the displayed total (tax extracted) rather
   // than adding tax on top of an already-tax-inclusive line price.
   const taxInclusive = !!settings.tax?.inclusive;
+  // Resolve each line's taxable flag from the live product so a non-taxable
+  // product NEVER contributes tax.
+  const cartTaxed = useMemo(
+    () => cart.map((l) => ({ ...l, taxable: products.find((p) => p.id === l.refId)?.taxable !== false })),
+    [cart, products],
+  );
   const totals = useMemo(
-    () => computeLineTotals(cart, discount, taxRate, taxInclusive),
-    [cart, discount, taxRate, taxInclusive],
+    () => computeLineTotals(cartTaxed, discount, taxRate, taxInclusive),
+    [cartTaxed, discount, taxRate, taxInclusive],
   );
 
   function addToCart(p: Product) {
@@ -147,7 +154,7 @@ export function PosClient({
         next[i] = { ...next[i], qty: next[i].qty + 1 };
         return next;
       }
-      return [...prev, { refId: p.id, name: p.name, qty: 1, price: Number(p.selling_price), stock: Number(p.current_stock) }];
+      return [...prev, { refId: p.id, name: p.name, qty: 1, price: Number(p.selling_price), stock: Number(p.current_stock), taxable: p.taxable !== false }];
     });
   }
 
@@ -166,7 +173,7 @@ export function PosClient({
       return [...prev, {
         refId: p.id, name: p.name, qty: unitIds.length,
         price: Number(p.selling_price), stock: Number(p.current_stock),
-        serial_tracked: true, unit_ids: unitIds,
+        serial_tracked: true, unit_ids: unitIds, taxable: p.taxable !== false,
       }];
     });
   }
@@ -199,11 +206,14 @@ export function PosClient({
     }
     setCart((prev) => prev.map((l) => l.refId === refId ? { ...l, qty: Math.max(0, qty) } : l).filter((l) => l.qty > 0));
   }
+  function setPrice(refId: string, price: number) {
+    setCart((prev) => prev.map((l) => l.refId === refId ? { ...l, price: Math.max(0, price) } : l));
+  }
   function removeLine(refId: string) {
     setCart((prev) => prev.filter((l) => l.refId !== refId));
   }
   function clearCart() {
-    setCart([]); setDiscount(0); setCustomerId(""); setTaxRate(defaultTax);
+    setCart([]); setDiscount(0); setCustomerId("");
   }
 
   function parkCurrent() {
@@ -223,7 +233,6 @@ export function PosClient({
     if (cart.length > 0 && !confirm("Replace the current cart with this parked sale?")) return;
     setCart(p.cart);
     setDiscount(p.discount);
-    setTaxRate(p.taxRate);
     setCustomerId(p.customerId);
     persistParked(parked.filter((x) => x.id !== p.id));
     setParkOpen(false);
@@ -412,7 +421,15 @@ export function PosClient({
                         onClick={() => changeQty(l.refId, 1)} disabled={l.qty >= l.stock}>
                         <Plus className="h-3 w-3" />
                       </Button>
-                      <span className="text-xs text-slate-500 ml-1">× {formatMoney(l.price, sym)}</span>
+                      <span className="text-xs text-slate-500 ml-1">×</span>
+                      <Input
+                        type="number" step="0.01" min="0"
+                        value={l.price}
+                        onChange={(e) => setPrice(l.refId, Number(e.target.value) || 0)}
+                        onFocus={(e) => e.currentTarget.select()}
+                        className="h-7 w-20 text-right text-sm px-1.5"
+                        title="Selling price (editable)"
+                      />
                     </div>
                   </div>
                   <div className="text-right">
@@ -441,14 +458,8 @@ export function PosClient({
                 onChange={(e) => setDiscount(Number(e.target.value) || 0)}
                 className="h-7 w-24 text-right" />
             </div>
-            <div className="flex justify-between items-center">
-              <span className="text-slate-600">Tax %</span>
-              <Input type="number" step="0.01" min="0" value={taxRate}
-                onChange={(e) => setTaxRate(Number(e.target.value) || 0)}
-                className="h-7 w-24 text-right" />
-            </div>
             <div className="flex justify-between text-slate-600 text-xs">
-              <span>Tax amount</span><span>{formatMoney(totals.tax, sym)}</span>
+              <span>Tax ({taxRate}% — from Settings, taxable items)</span><span>{formatMoney(totals.tax, sym)}</span>
             </div>
             <div className="flex justify-between pt-2 mt-2 border-t border-slate-300">
               <span className="text-lg font-semibold text-slate-900">Total</span>
@@ -477,7 +488,7 @@ export function PosClient({
           settings={settings}
           customerId={customerId}
           customers={customers}
-          cart={cart}
+          cart={cartTaxed}
           discount={discount}
           taxRate={taxRate}
           onClose={() => setPayOpen(false)}

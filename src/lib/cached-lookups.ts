@@ -14,7 +14,7 @@ export const getCachedCustomersList = unstable_cache(
   async () => {
     const admin = createServiceClient();
     const tid = currentTenantId();
-    let q = admin.from("customers").select("id, name").order("name");
+    let q = admin.from("customers").select("id, name, balance, credit_limit, opening_balance").order("name");
     if (tid) q = q.eq("tenant_id", tid);
     const { data } = await q;
     return data ?? [];
@@ -68,7 +68,7 @@ export const getCachedActiveProductsList = unstable_cache(
     const tid = currentTenantId();
     let q = admin
       .from("products")
-      .select("id, name, code, unit, cost_price, selling_price, current_stock, min_stock, serial_tracked")
+      .select("id, name, code, unit, cost_price, selling_price, current_stock, min_stock, serial_tracked, taxable")
       .eq("status", "active")
       .order("name");
     if (tid) q = q.eq("tenant_id", tid);
