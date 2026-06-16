@@ -805,8 +805,10 @@ function SaleEditor({
   }
 
   function setQty(index: number, qty: number) {
+    // Quantities are whole numbers; never below 1.
+    const whole = Math.max(1, Math.round(Number(qty) || 0));
     const next = [...lines];
-    next[index] = { ...next[index], qty: Math.max(0, qty) };
+    next[index] = { ...next[index], qty: whole };
     setLines(next);
   }
 
@@ -1052,9 +1054,9 @@ function SaleEditor({
               )}
             </div>
 
-            <div className="border rounded-lg overflow-x-auto bg-white">
+            <div className="border rounded-lg bg-white">
               {/* Column headers */}
-              <div className="grid grid-cols-[36px_minmax(160px,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 bg-slate-100 text-[11px] font-semibold uppercase tracking-wide text-slate-600 min-w-[560px]">
+              <div className="grid grid-cols-[36px_minmax(140px,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 bg-slate-100 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
                 <div className="text-center">#</div>
                 <div>Product / Service</div>
                 <div className="text-right">Qty</div>
@@ -1078,7 +1080,7 @@ function SaleEditor({
                   const picked = l.unit_ids?.length ?? 0;
                   return (
                   <div key={i} className="border-t bg-white hover:bg-slate-50">
-                    <div className="grid grid-cols-[36px_minmax(160px,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 items-center min-w-[560px]">
+                    <div className="grid grid-cols-[36px_minmax(140px,1fr)_130px_110px_120px_36px] gap-2 px-3 py-2 items-center">
                     <div className="text-center text-xs text-slate-400 font-medium">{i + 1}</div>
                     <div className="min-w-0">
                       <Combobox
@@ -1103,9 +1105,7 @@ function SaleEditor({
                     </div>
                     <LineQtyInput
                       value={Number(l.qty)}
-                      readOnly={serial}
-                      disabled={serial}
-                      title={serial ? "Quantity is set by the serial units you select" : undefined}
+                      title={serial ? "Set the quantity, then pick that many serial numbers below" : undefined}
                       onCommit={(n) => setQty(i, n)}
                     />
                     <Input
@@ -1486,17 +1486,21 @@ function LineQtyInput({
 }: {
   value: number; readOnly?: boolean; disabled?: boolean; title?: string; onCommit: (n: number) => void;
 }) {
+  // Local string buffer so the user can clear the field while typing; we always
+  // commit whole numbers (qty never goes below 1).
   const [str, setStr] = useState(String(value));
   useEffect(() => { setStr(String(value)); }, [value]);
+  const current = Math.max(1, Math.round(Number(value) || 1));
+  const commitWhole = (n: number) => onCommit(Math.max(1, Math.round(n)));
   return (
     <div className="inline-flex h-9 w-full items-stretch rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm focus-within:ring-2 focus-within:ring-blue-500/30 focus-within:border-blue-400">
-      <button type="button" title="Decrease" disabled={disabled} onClick={() => onCommit(Math.max(0, value - 1))}
+      <button type="button" title="Decrease" disabled={disabled || readOnly} onClick={() => commitWhole(current - 1)}
         className="w-7 shrink-0 grid place-items-center text-slate-500 hover:bg-slate-100 active:bg-slate-200 transition-colors disabled:opacity-40">
         <Minus className="h-3.5 w-3.5" />
       </button>
       <input
         className="flex-1 min-w-[2.5rem] text-center text-sm tabular-nums border-x border-slate-200 outline-none bg-transparent"
-        type="number" step="0.01" min="0"
+        type="number" step="1" min="1"
         readOnly={readOnly}
         title={title}
         value={str}
@@ -1504,11 +1508,11 @@ function LineQtyInput({
         onChange={(e) => {
           setStr(e.target.value);
           const n = Number(e.target.value);
-          if (e.target.value !== "" && !Number.isNaN(n)) onCommit(n);
+          if (e.target.value !== "" && Number.isFinite(n)) commitWhole(n);
         }}
-        onBlur={() => { if (str === "" || Number.isNaN(Number(str))) { setStr(String(value)); onCommit(value); } }}
+        onBlur={() => { setStr(String(current)); if (str === "" || !Number.isFinite(Number(str))) commitWhole(current); }}
       />
-      <button type="button" title="Increase" disabled={disabled} onClick={() => onCommit(value + 1)}
+      <button type="button" title="Increase" disabled={disabled || readOnly} onClick={() => commitWhole(current + 1)}
         className="w-7 shrink-0 grid place-items-center text-slate-500 hover:bg-slate-100 active:bg-slate-200 transition-colors disabled:opacity-40">
         <Plus className="h-3.5 w-3.5" />
       </button>

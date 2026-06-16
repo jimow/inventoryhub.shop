@@ -70,7 +70,7 @@ export function Combobox({
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-lg">
+        <div className="absolute z-50 mt-1 w-full min-w-[18rem] max-w-[min(28rem,90vw)] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-lg">
           <div className="border-b p-2">
             <input
               autoFocus
@@ -80,7 +80,7 @@ export function Combobox({
               className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
           </div>
-          <div className="max-h-60 overflow-y-auto py-1">
+          <div className="max-h-72 overflow-y-auto py-1">
             {filtered.length === 0 ? (
               <div className="px-3 py-2 text-sm text-muted-foreground">{emptyText}</div>
             ) : (
