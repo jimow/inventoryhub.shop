@@ -4,7 +4,7 @@
 // still trigger an entry).
 
 import { createServiceClient, currentTenantId } from "@/lib/supabase/server";
-import { reserveNextNumber } from "@/lib/numbering";
+import { reserveNextNumber, getSettings } from "@/lib/numbering";
 import { logActivity } from "@/lib/audit";
 import type { Sale, Purchase, Payment } from "@/lib/types";
 
@@ -268,11 +268,25 @@ export async function postCogsJournal(
 export async function postPurchaseJournal(purchase: Purchase) {
   const total = Number(purchase.total);
   const tax = Number(purchase.tax) || 0;
-  const inventory = Math.round((total - tax) * 100) / 100;
+  // Transport / handling charges on this PO (purchase-level + per-line).
+  const lineCharges = ((purchase.items as { charge?: number }[]) || [])
+    .reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
+  const charges = Math.round((Number(purchase.transport_cost || 0) + Number(purchase.other_charges || 0) + lineCharges) * 100) / 100;
+
+  const cfg = await getSettings();
+  const expenseCharges = cfg.accounting?.chargeMode === "expense" && charges > 0;
+  const chargeAcct = cfg.accounting?.chargeAccountCode || "5300";
+
+  // capitalize: inventory absorbs the charges (inventory = total − tax).
+  // expense:    inventory = goods only; charges hit a separate expense account.
+  const inventory = Math.round((total - tax - (expenseCharges ? charges : 0)) * 100) / 100;
   const lines: LineInput[] = [
     { account_code: "1300", debit: inventory, description: `Purchase ${purchase.po_no}` },
     { account_code: "2000", credit: total,    description: `Purchase ${purchase.po_no}` },
   ];
+  if (expenseCharges) {
+    lines.push({ account_code: chargeAcct, debit: charges, description: `Freight & handling on ${purchase.po_no}` });
+  }
   if (tax > 0) {
     lines.push({ account_code: "2100", debit: tax, description: `Input tax on ${purchase.po_no}` });
   }

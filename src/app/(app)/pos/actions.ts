@@ -370,6 +370,7 @@ export async function listAvailableUnits(
       .select("id, serial_no, barcode, cost")
       .eq("product_id", product_id)
       .eq("status", "in_stock")
+      .eq("location", "shop") // only shop stock is sellable
       .order("created_at", { ascending: true })
       .limit(200);
     const q = (search || "").trim();

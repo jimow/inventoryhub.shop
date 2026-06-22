@@ -73,6 +73,7 @@ export async function createCashPurchase(
   serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
   paidAmount?: number,
   payment_method_id?: string | null,
+  location: "shop" | "store" = "shop",
 ): Promise<Result> {
   try {
     await requirePermission("purchases", "create");
@@ -95,7 +96,7 @@ export async function createCashPurchase(
       .single();
     if (error || !created) return { ok: false, error: error?.message || "Failed to create purchase" };
 
-    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, paidAmount, payment_method_id);
+    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, paidAmount, payment_method_id, location);
     if (!r.ok) {
       // Validation failed before any stock moved — drop the orphan so the user
       // isn't left with a stranded "ordered" PO.
@@ -118,6 +119,7 @@ export async function createCashPurchase(
 export async function createCreditPurchase(
   formData: FormData,
   serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
+  location: "shop" | "store" = "shop",
 ): Promise<Result> {
   try {
     await requirePermission("purchases", "create");
@@ -137,7 +139,7 @@ export async function createCreditPurchase(
     if (error || !created) return { ok: false, error: error?.message || "Failed to create purchase" };
 
     // Receive with NO payment → stock up + A/P up, balance owed to supplier.
-    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, 0, null);
+    const r = await receiveOrderedPurchase(created.id as string, serialsByLine, 0, null, location);
     if (!r.ok) {
       await supabase.from("purchases").delete().eq("id", created.id);
       return r;
@@ -192,19 +194,22 @@ export async function receivePurchase(
   serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
   paidAmount?: number,
   payment_method_id?: string | null,
+  location: "shop" | "store" = "shop",
 ): Promise<Result> {
   try {
     await requirePermission("purchases", "edit");
-    return await receiveOrderedPurchase(id, serialsByLine, paidAmount, payment_method_id);
+    return await receiveOrderedPurchase(id, serialsByLine, paidAmount, payment_method_id, location);
   } catch (e) { return { ok: false, error: (e as Error).message }; }
 }
 
-/** Core receive + (cash) pay. No permission check — callers must authorize. */
+/** Core receive + (cash) pay. No permission check — callers must authorize.
+ *  `location` is where the goods land: "shop" (sellable) or "store" (held back). */
 async function receiveOrderedPurchase(
   id: string,
   serialsByLine?: Record<number, { serial: string; barcode?: string }[]>,
   paidAmount?: number,
   payment_method_id?: string | null,
+  location: "shop" | "store" = "shop",
 ): Promise<Result> {
   try {
     const supabase = await createClient();
@@ -217,9 +222,9 @@ async function receiveOrderedPurchase(
     const refIds = Array.from(new Set(lines.map((l) => l.refId)));
     const { data: prods } = await admin
       .from("products")
-      .select("id, name, serial_tracked, current_stock, cost_price")
+      .select("id, name, serial_tracked, current_stock, store_stock, cost_price")
       .in("id", refIds);
-    type Prod = { id: string; name: string; serial_tracked: boolean; current_stock: number; cost_price: number };
+    type Prod = { id: string; name: string; serial_tracked: boolean; current_stock: number; store_stock: number; cost_price: number };
     const prodMap = new Map<string, Prod>((prods || []).map((p) => [p.id, p as Prod]));
 
     // LANDED COST: spread the purchase's net cost (goods − discount + transport +
@@ -229,14 +234,21 @@ async function receiveOrderedPurchase(
     // assigned directly to that line. The sum equals the Inventory debit exactly.
     const lineValue = (l: PurchaseLine) => Number(l.price) * Number(l.qty);
     const totalGoods = lines.reduce((s, l) => s + lineValue(l), 0);
-    const totalSpecific = lines.reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
-    const invDebit = Math.round((Number(po.total) - Number(po.tax || 0)) * 100) / 100;
+    // When charges are EXPENSED separately (Settings), they stay out of unit
+    // cost — inventory = goods net of discount only. When CAPITALIZED (default),
+    // they're spread into unit cost exactly as the inventory journal debits them.
+    const cfg2 = await getSettings();
+    const expenseCharges = cfg2.accounting?.chargeMode === "expense";
+    const totalSpecific = expenseCharges ? 0 : lines.reduce((s, l) => s + Math.max(0, Number(l.charge || 0) || 0), 0);
+    const invDebit = expenseCharges
+      ? Math.round((Number(po.subtotal || 0) - Number(po.discount || 0)) * 100) / 100
+      : Math.round((Number(po.total) - Number(po.tax || 0)) * 100) / 100;
     const remainder = invDebit - totalSpecific;
     const landedUnitCost = lines.map((l) => {
       const qty = Number(l.qty) || 0;
       if (qty <= 0) return 0;
       const alloc = totalGoods > 0 ? remainder * (lineValue(l) / totalGoods) : remainder / lines.length;
-      const landed = alloc + Math.max(0, Number(l.charge || 0) || 0);
+      const landed = alloc + (expenseCharges ? 0 : Math.max(0, Number(l.charge || 0) || 0));
       return landed / qty;
     });
 
@@ -261,16 +273,21 @@ async function receiveOrderedPurchase(
       if (!p) continue;
       const qty = Number(l.qty) || 0;
       const landed = Math.round((landedUnitCost[i] || 0) * 10000) / 10000;
-      // Moving-average cost: blend the landed unit cost into the existing stock.
-      const oldStock = Number(p.current_stock) || 0;
+      // Moving-average cost is product-wide (cost doesn't depend on location), so
+      // blend against TOTAL existing stock (shop + store).
+      const oldShop = Number(p.current_stock) || 0;
+      const oldStore = Number(p.store_stock) || 0;
+      const oldTotal = oldShop + oldStore;
       const oldCost = Number(p.cost_price) || 0;
-      const newStock = oldStock + qty;
-      const newCost = newStock > 0
-        ? Math.round(((oldStock * oldCost + landed * qty) / newStock) * 10000) / 10000
+      const newTotal = oldTotal + qty;
+      const newCost = newTotal > 0
+        ? Math.round(((oldTotal * oldCost + landed * qty) / newTotal) * 10000) / 10000
         : landed;
-      await admin.from("products")
-        .update({ current_stock: newStock, cost_price: newCost })
-        .eq("id", l.refId);
+      // Route the received qty to the chosen location.
+      const stockPatch = location === "store"
+        ? { store_stock: oldStore + qty, cost_price: newCost }
+        : { current_stock: oldShop + qty, cost_price: newCost };
+      await admin.from("products").update(stockPatch).eq("id", l.refId);
 
       if (p.serial_tracked) {
         const serials = serialsByLine?.[i] || [];
@@ -279,6 +296,7 @@ async function receiveOrderedPurchase(
           serial_no:         s.serial.trim(),
           barcode:           s.barcode?.trim() || null,
           status:            "in_stock",
+          location,          // units live where the goods were received
           cost:              landed, // landed cost per unit, not bare line price
           purchase_id:       po.id,
           purchase_line_idx: i,

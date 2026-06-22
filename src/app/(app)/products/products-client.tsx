@@ -53,10 +53,20 @@ export function ProductsClient({
     { key: "sku", label: "SKU", className: "w-[120px]" },
     { key: "selling_price", label: "Sell Price", className: "w-[120px] text-right",
       render: (r) => formatMoney(r.selling_price, settings.currency?.symbol) },
-    { key: "current_stock", label: "Stock", className: "w-[140px]",
+    { key: "current_stock", label: "Stock", className: "w-[180px]",
       render: (r) => {
-        const low = Number(r.current_stock || 0) <= Number(r.min_stock || 0);
-        return <Badge variant={low ? "danger" : "success"}>{Number(r.current_stock || 0)} {r.unit}</Badge>;
+        const shop = Number(r.current_stock || 0);
+        const store = Number(r.store_stock || 0);
+        const total = shop + store;
+        const low = total <= Number(r.min_stock || 0);
+        return (
+          <div className="flex flex-col gap-0.5">
+            <Badge variant={low ? "danger" : "success"} className="w-fit">{total} {r.unit}</Badge>
+            <span className="text-[10px] text-slate-500 tabular-nums">
+              Shop {shop}{store > 0 && <> · <span className="text-amber-700">Store {store}</span></>}
+            </span>
+          </div>
+        );
       } },
     { key: "status", label: "Status", className: "w-[100px]",
       render: (r) => <Badge variant={r.status === "active" ? "success" : "secondary"}>{r.status}</Badge> },

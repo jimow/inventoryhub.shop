@@ -53,17 +53,25 @@ export default async function ProductDetail({
     { data: suppliers },
     { data: salesReturns },
     { data: purchaseReturns },
+    { data: transfers },
   ] = await Promise.all([
     supabase.from("purchases").select("id, po_no, date, items, status, total, supplier_id"),
     supabase.from("sales").select("id, invoice_no, date, items, status, total, customer_id"),
     supabase.from("stock_adjustments").select("*").eq("product_id", id).order("created_at", { ascending: false }),
-    supabase.from("inventory_units").select("id, serial_no, barcode, status, cost, purchase_id, sale_id, created_at, updated_at")
+    supabase.from("inventory_units").select("id, serial_no, barcode, status, location, cost, purchase_id, sale_id, created_at, updated_at")
       .eq("product_id", id).order("created_at", { ascending: false }),
     supabase.from("customers").select("id, name"),
     supabase.from("suppliers").select("id, name"),
     supabase.from("sales_returns").select("return_no, date, items, status, customer_id"),
     supabase.from("purchase_returns").select("return_no, date, items, status, supplier_id"),
+    supabase.from("stock_transfers").select("id, transfer_no, qty, direction, date, reference, charge, serials, notes, created_at").eq("product_id", id).order("created_at", { ascending: false }),
   ]);
+  type Transfer = {
+    id: string; transfer_no: string | null; qty: number; direction: "to_shop" | "to_store";
+    date: string; reference: string | null; charge: number | null;
+    serials: { unit_id: string; serial_no: string }[] | null; notes: string | null; created_at: string;
+  };
+  const transferRows = (transfers as Transfer[]) || [];
   const customerName = new Map((customers || []).map((c) => [c.id as string, c.name as string]));
   const supplierName = new Map((suppliers || []).map((s) => [s.id as string, s.name as string]));
 
@@ -196,7 +204,10 @@ export default async function ProductDetail({
 
   const unitsInStock = (units || []).filter((u) => u.status === "in_stock").length;
   const unitsSold    = (units || []).filter((u) => u.status === "sold").length;
-  const stockValue   = Number(p.current_stock) * Number(p.cost_price);
+  const shopStock    = Number(p.current_stock) || 0;
+  const storeStock   = Number(p.store_stock) || 0;
+  const totalOnHand  = shopStock + storeStock;
+  const stockValue   = totalOnHand * Number(p.cost_price);
 
   return (
     <div>
@@ -210,7 +221,7 @@ export default async function ProductDetail({
       </PageHeader>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <Stat label="On hand"     value={`${p.current_stock} ${p.unit}`} icon={Box}            color="bg-blue-500" />
+        <Stat label="On hand"     value={`${totalOnHand} ${p.unit}`} sub={`Shop ${shopStock} · Store ${storeStock}`} icon={Box} color="bg-blue-500" />
         <Stat label="Stock value" value={formatMoney(stockValue)}        icon={Package}        color="bg-emerald-500" />
         <Stat label="Sold (range)" value={`${soldQty} ${p.unit}`}        icon={ReceiptIcon}    color="bg-cyan-500" />
         <Stat label="Purchased (range)" value={`${purchasedQty} ${p.unit}`} icon={ShoppingCart} color="bg-amber-500" />
@@ -351,6 +362,55 @@ export default async function ProductDetail({
         </div>
       </Card>
 
+      {/* Store ↔ Shop transfers for this product */}
+      {transferRows.length > 0 && (
+        <Card className="mt-4">
+          <div className="p-4 border-b">
+            <div className="font-semibold text-slate-900">Store ↔ Shop transfers</div>
+            <div className="text-xs text-slate-500 mt-0.5">Movements between the warehouse and the sales floor (don&apos;t change total on hand)</div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="text-left p-3">Doc / Date</th>
+                  <th className="text-left p-3">Direction</th>
+                  <th className="text-right p-3">Qty</th>
+                  <th className="text-right p-3">Charge</th>
+                  <th className="text-left p-3">Serials / Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transferRows.map((t) => (
+                  <tr key={t.id} className="border-t align-top">
+                    <td className="p-3 whitespace-nowrap">
+                      <div className="font-mono text-xs text-slate-700">{t.transfer_no || "—"}</div>
+                      <div className="text-xs text-slate-400">{formatDate(t.date)}</div>
+                      {t.reference && <div className="text-[11px] text-slate-400">Ref: {t.reference}</div>}
+                    </td>
+                    <td className="p-3">
+                      {t.direction === "to_shop"
+                        ? <Badge variant="success">Store → Shop</Badge>
+                        : <Badge variant="warning">Shop → Store</Badge>}
+                    </td>
+                    <td className="p-3 text-right tabular-nums font-medium">{Number(t.qty).toLocaleString()} {p.unit}</td>
+                    <td className="p-3 text-right tabular-nums">{Number(t.charge || 0) > 0 ? formatMoney(Number(t.charge)) : <span className="text-slate-300">—</span>}</td>
+                    <td className="p-3 text-slate-600">
+                      {Array.isArray(t.serials) && t.serials.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-1">
+                          {t.serials.map((s) => <span key={s.unit_id} className="font-mono text-[10px] bg-slate-100 rounded px-1.5 py-0.5">{s.serial_no}</span>)}
+                        </div>
+                      )}
+                      {t.notes || (!t.serials?.length && <span className="text-slate-300">—</span>)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
       {/* Serial units table (if serial-tracked) */}
       {p.serial_tracked && (units?.length ?? 0) > 0 && (
         <Card className="mt-4">
@@ -367,6 +427,7 @@ export default async function ProductDetail({
                   <th className="text-left p-3">Serial</th>
                   <th className="text-left p-3">Barcode</th>
                   <th className="text-left p-3">Status</th>
+                  <th className="text-left p-3">Location</th>
                   <th className="text-right p-3">Cost</th>
                   <th className="text-left p-3">Created</th>
                 </tr>
@@ -378,6 +439,11 @@ export default async function ProductDetail({
                     <td className="p-3 font-mono text-slate-500">{u.barcode || "-"}</td>
                     <td className="p-3">
                       <Badge variant={u.status === "in_stock" ? "success" : u.status === "sold" ? "info" : "secondary"}>{u.status}</Badge>
+                    </td>
+                    <td className="p-3">
+                      {u.status === "in_stock"
+                        ? <Badge variant={(u as { location?: string }).location === "store" ? "warning" : "secondary"}>{(u as { location?: string }).location === "store" ? "Store" : "Shop"}</Badge>
+                        : <span className="text-slate-300">—</span>}
                     </td>
                     <td className="p-3 text-right">{formatMoney(u.cost)}</td>
                     <td className="p-3">{formatDate(u.created_at)}</td>
@@ -392,16 +458,17 @@ export default async function ProductDetail({
   );
 }
 
-function Stat({ label, value, icon: Icon, color }: { label: string; value: string; icon: React.ElementType; color: string }) {
+function Stat({ label, value, sub, icon: Icon, color }: { label: string; value: string; sub?: string; icon: React.ElementType; color: string }) {
   return (
     <Card>
       <CardContent className="flex items-center gap-3 p-4">
         <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-white ${color}`}>
           <Icon className="h-5 w-5" />
         </div>
-        <div>
+        <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
           <div className="text-lg font-bold text-slate-900">{value}</div>
+          {sub && <div className="text-[11px] text-slate-500 truncate">{sub}</div>}
         </div>
       </CardContent>
     </Card>

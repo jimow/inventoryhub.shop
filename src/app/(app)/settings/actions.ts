@@ -215,6 +215,8 @@ export async function saveAccountingDefaults(formData: FormData): Promise<Result
       defaultBankAccountCode:    str(formData, "defaultBankAccountCode", "1100"),
       defaultRevenueAccountCode: str(formData, "defaultRevenueAccountCode", "4000"),
       defaultCogsAccountCode:    str(formData, "defaultCogsAccountCode", "5000"),
+      chargeMode:                (str(formData, "chargeMode", "capitalize") as "capitalize" | "expense"),
+      chargeAccountCode:         str(formData, "chargeAccountCode", "5300"),
     },
   });
 }

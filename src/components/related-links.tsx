@@ -21,9 +21,15 @@ const MAP: Record<string, Related[]> = {
     { href: "/receipts", label: "Receipts" },
   ],
   "/products": [
+    { href: "/store", label: "Store / Warehouse" },
     { href: "/reports", label: "Stock Report" },
     { href: "/purchases", label: "Purchases" },
     { href: "/sales", label: "Sales" },
+  ],
+  "/store": [
+    { href: "/products", label: "Products" },
+    { href: "/purchases", label: "Purchases" },
+    { href: "/reports", label: "Stock Report" },
   ],
   "/customers": [
     { href: "/sales", label: "Sales" },

@@ -26,6 +26,7 @@ import {
   Undo2,
   History,
   FileText,
+  Warehouse,
 } from "lucide-react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -47,6 +48,7 @@ const NAV: NavItem[] = [
   { href: "/pos",               label: "Point of Sale",     module: "pos",        icon: ScanLine,        section: "Overview" },
 
   { href: "/products",          label: "Products",          module: "products",   icon: Package,         section: "Inventory" },
+  { href: "/store",             label: "Store / Warehouse", module: "store",      icon: Warehouse,       section: "Inventory" },
 
   { href: "/customers",         label: "Customers",         module: "customers",  icon: UsersIcon,       section: "Contacts" },
   { href: "/suppliers",         label: "Suppliers",         module: "suppliers",  icon: Truck,           section: "Contacts" },

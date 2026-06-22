@@ -37,7 +37,10 @@ export type Product = {
   unit: string;
   cost_price: number;
   selling_price: number;
+  /** SHOP (sales-floor) stock — the only stock that can be sold. */
   current_stock: number;
+  /** STORE (back-room / warehouse) stock — must be transferred to shop to sell. */
+  store_stock: number;
   min_stock: number;
   taxable: boolean;
   serial_tracked: boolean;
@@ -53,6 +56,8 @@ export type InventoryUnit = {
   serial_no: string;
   barcode: string | null;
   status: "in_stock" | "sold" | "scrapped" | "returned";
+  /** Which location this physical unit currently sits in. */
+  location: "shop" | "store";
   cost: number;
   purchase_id: string | null;
   purchase_line_idx: number | null;
@@ -61,6 +66,27 @@ export type InventoryUnit = {
   notes: string | null;
   created_at: string;
   updated_at: string;
+};
+
+/** A serial unit captured on a transfer document. */
+export type TransferSerial = { unit_id: string; serial_no: string };
+
+/** Audit record of a store<->shop stock transfer (a transfer document). */
+export type StockTransfer = {
+  id: string;
+  transfer_no: string | null;
+  product_id: string;
+  qty: number;
+  direction: "to_shop" | "to_store";
+  date: string;
+  reference: string | null;
+  charge: number;
+  charge_paid_from: string | null;
+  serials: TransferSerial[];
+  journal_entry_id: string | null;
+  notes: string | null;
+  created_at: string;
+  created_by: string | null;
 };
 
 export type Customer = {
@@ -327,6 +353,15 @@ export type SettingsData = {
     defaultBankAccountCode?: string;
     defaultRevenueAccountCode?: string;
     defaultCogsAccountCode?: string;
+    /**
+     * How transport / handling charges (on purchases and store transfers) are
+     * accounted for:
+     *  - "capitalize" (default): folded into inventory cost (lump sum).
+     *  - "expense": posted to a separate expense account, kept out of item cost.
+     */
+    chargeMode?: "capitalize" | "expense";
+    /** Expense account code charges post to in "expense" mode (default 5300). */
+    chargeAccountCode?: string;
   };
   numbering: {
     invoicePrefix: string;
@@ -351,6 +386,7 @@ export type SettingsData = {
     nextPurchaseReturn?: number;
     nextQuotation?: number;
     quotePrefix?: string;
+    nextTransfer?: number;
   };
   productCategories: string[];
   units: string[];

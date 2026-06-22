@@ -508,6 +508,22 @@ function AccountingDefaultsTab({ data, editable }: { data: SettingsData; editabl
           <Input id="defaultCogsAccountCode" name="defaultCogsAccountCode" defaultValue={a.defaultCogsAccountCode || "5000"} disabled={!editable} />
         </div>
       </div>
+
+      <h3 className="text-sm font-semibold mt-5 mb-2">Transport / handling charges</h3>
+      <p className="text-xs text-muted-foreground mb-2">
+        Controls how charges on <b>purchases</b> and <b>store transfers</b> are booked.
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        <div><Label htmlFor="chargeMode">Charge handling</Label>
+          <Select id="chargeMode" name="chargeMode" defaultValue={a.chargeMode || "capitalize"} disabled={!editable}>
+            <option value="capitalize">Lump sum — add to item cost (capitalize)</option>
+            <option value="expense">Separate — post to an expense account</option>
+          </Select>
+        </div>
+        <div><Label htmlFor="chargeAccountCode">Charge expense account</Label>
+          <Input id="chargeAccountCode" name="chargeAccountCode" defaultValue={a.chargeAccountCode || "5300"} disabled={!editable} />
+        </div>
+      </div>
       <SaveBar pending={pending} editable={editable} />
     </form>
   );

@@ -438,6 +438,8 @@ function PurchaseEditor({
   const isNewCredit = !purchase && purchaseType === "credit";
   const [receiveNow, setReceiveNow] = useState(true);
   const receiveCredit = isNewCredit && receiveNow;
+  // Where received goods land: "shop" (sellable) or "store" (warehouse).
+  const [receiveLocation, setReceiveLocation] = useState<"shop" | "store">("shop");
   const [serials, setSerials] = useState<Record<string, { serial: string; barcode: string }[]>>({});
   const [methodId, setMethodId] = useState<string>(methods.find((m) => m.kind === "cash")?.id || methods[0]?.id || "");
   const [paid, setPaid] = useState<number>(0);
@@ -574,7 +576,7 @@ function PurchaseEditor({
       const serialsByLine = buildSerials();
       if (!serialsByLine) return;
       start(async () => {
-        const r = await createCashPurchase(fd, serialsByLine, paid, methodId || null);
+        const r = await createCashPurchase(fd, serialsByLine, paid, methodId || null, receiveLocation);
         if (!r.ok) { toast.error(r.error || "Save failed"); return; }
         toast.success(paidPartial ? "Cash purchase received — balance recorded" : "Cash purchase received & paid");
         onClose(); router.refresh();
@@ -587,7 +589,7 @@ function PurchaseEditor({
       const serialsByLine = buildSerials();
       if (!serialsByLine) return;
       start(async () => {
-        const r = await createCreditPurchase(fd, serialsByLine);
+        const r = await createCreditPurchase(fd, serialsByLine, receiveLocation);
         if (!r.ok) { toast.error(r.error || "Save failed"); return; }
         toast.success("Credit purchase received — stock updated, balance owed to supplier");
         onClose(); router.refresh();
@@ -807,6 +809,17 @@ function PurchaseEditor({
               <p className="text-[11px] text-muted-foreground">Charges are capitalized into item cost on receive.</p>
             )}
 
+            {/* Where the goods are received: shop (sellable) or store (warehouse) */}
+            {(isNewCash || receiveCredit) && (
+              <div className="flex justify-between items-center gap-2 pt-2.5 mt-2.5 border-t-2 border-dashed border-slate-300">
+                <span className="text-slate-600 text-xs">Receive into <span className="text-slate-400">(store stock can&apos;t be sold until moved to the shop)</span></span>
+                <Select className="h-8 w-32" value={receiveLocation} onChange={(e) => setReceiveLocation(e.target.value as "shop" | "store")}>
+                  <option value="shop">Shop (sellable)</option>
+                  <option value="store">Store</option>
+                </Select>
+              </div>
+            )}
+
             {/* CREDIT: receive goods immediately (stock + A/P) vs. save a draft PO */}
             {isNewCredit && (
               <label className="flex items-center justify-between gap-2 pt-2.5 mt-2.5 border-t-2 border-dashed border-slate-300 cursor-pointer">
@@ -892,6 +905,7 @@ function ReceiveDialog({
   const total = Number(purchase.total) || 0;
   const [paid, setPaid] = useState<number>(total);
   const paidPartial = isCash && paid < total - 0.01;
+  const [location, setLocation] = useState<"shop" | "store">("shop");
 
   function submit() {
     for (const [idxStr, units] of Object.entries(serials)) {
@@ -920,6 +934,7 @@ function ReceiveDialog({
         purchase.id, serials,
         isCash ? paid : undefined,
         isCash ? (methodId || null) : null,
+        location,
       );
       if (!r.ok) { toast.error(r.error || "Receive failed"); return; }
       toast.success(`PO ${purchase.po_no} received${isCash ? " & paid" : ""}`);
@@ -984,6 +999,13 @@ function ReceiveDialog({
               </div>
             );
           })}
+        </div>
+        <div className="border-t pt-3 mt-1 flex items-center justify-between gap-2">
+          <Label htmlFor="rcv_loc" className="m-0">Receive into</Label>
+          <Select id="rcv_loc" className="h-9 w-48" value={location} onChange={(e) => setLocation(e.target.value as "shop" | "store")}>
+            <option value="shop">Shop (sellable)</option>
+            <option value="store">Store / warehouse</option>
+          </Select>
         </div>
         {isCash && (
           <div className="border-t pt-3 mt-1 space-y-2">
